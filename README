@@ -1,3 +1,30 @@
+***********************
+This forked repo readme
+-----------------------
+
+This repo added a branch named 'ls_icons', which changes were copied from
+https://github.com/sebastiencs/ls-icons.git.
+
+Also I removed the dependency to 'sebastiencs/icons-in-terminal'. So that
+we can use this repo independently. The icons' unicode are all placed in
+'src/icons-in-terminal.h'. We can change supported file types by modifing
+the structure 'file_matches' in 'src/ls-icons.c'.
+
+Here is how to use the branch of 'ls_icons':
+
+  sudo apt -y install clang autopoint
+  git switch ls_icons
+  git submodule update --init --recursive
+  ./bootstrap
+  export CFLAGS=-DNO_TRUE_COLOURS=1 # Execute this line _only_ if your terminal doesn't support true colours
+  export CC=clang CXX=clang++
+  ./configure --prefix=${PWD}/install
+  make
+  make install
+  cp -f ${PWD}/install/bin/ls SOMEWHERE_TO_YOUR_PATH
+
+----------------------------------------------------------------
+
 These are the GNU core utilities.  This package is the union of
 the GNU fileutils, sh-utils, and textutils packages.
 
