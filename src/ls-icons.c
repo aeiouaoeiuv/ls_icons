@@ -159,7 +159,7 @@ typedef struct {
 static t_file_matching file_matches[] = {
 
   // Insert new data here, not at the end of the structure
-
+  { DEV_VIM, MATCH( P("vimrc."), F("vimrc"), S(".vimrc")), YELLOW},
   { MD_LOCK, MATCH( S(".lock") ), MAROON},
   { MFIZZ_RUST, MATCH( F("Cargo.toml") ), LIGHT_MAROON},
   { MFIZZ_RUST, MATCH( S(".rs") ), MAROON},
@@ -312,7 +312,7 @@ static t_file_matching file_matches[] = {
   { FA_FILE_TEXT_O, MATCH( S(".srt") ), PURPLE},
   { OCT_FILE_BINARY, MATCH( S(".asm", ".S", ".nasm", ".masm") ), LIGHT_BLUE},
   { OCT_FILE_BINARY, MATCH( S(".elf", ".elc") ), LIGHT_PINK},
-  { OCT_FILE_BINARY, MATCH( F("a.out") ), DARK_GREEN},
+  { OCT_FILE_BINARY, MATCH( F("a.out"), S(".o") ), DARK_GREEN},
   { OCT_FILE_BINARY, MATCH( S(".bin", ".bsdiff", ".dat",
 			      ".pak", ".pdb") ), DARK_ORANGE},
   { OCT_FILE_BINARY, MATCH( S(".objdump", ".d-objdump") ), DARK_BLUE},
@@ -391,7 +391,7 @@ static t_file_matching file_matches[] = {
   { FA_FILE_TEXT_O, MATCH( S(".txt", ".text") ), BLUE},
   { OCT_DATABASE, MATCH( S(".cache") ), GREEN},
   { FA_FOLDER, MATCH( F(".", "..") ), DARK_BLUE},
-  { OCT_GEAR, MATCH( P(".") ), 0}
+  { OCT_FILE, MATCH( P(".") ), 0}
   // Insert new data at the beginning of the struture, not here !
 };
 
@@ -429,6 +429,10 @@ static int _print_icon(const char *filename, const size_t len,
 		       int is_quoted, int is_colored) {
   if (is_link) {
     write_icon(OCT_FILE_SYMLINK_FILE, LIGHT_BLUE, stream, is_colored);
+    return 0;
+  }
+  if (is_directory) {
+    write_icon(FA_FOLDER, BLUE, stream, is_colored);
     return 0;
   }
   for (int i = 0; i < size_file_matches; i += 1) {
