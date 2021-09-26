@@ -464,7 +464,7 @@ int print_icon(const char *filename, size_t len, FILE *stream,
 }
 
 int print_arrow_right(FILE *stream) {
-  const char arrow[] = " "MD_ARROW_FORWARD"  ";
+  const char arrow[] = " "MD_ARROW_FORWARD" ";
   fwrite(arrow, 1, sizeof arrow, stream);
   return 0;
 }
