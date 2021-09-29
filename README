@@ -13,8 +13,7 @@ the structure 'file_matches' in 'src/ls-icons.c'.
 Here is how to use the branch of 'ls_icons':
 
   sudo apt -y install clang autopoint
-  git switch ls_icons
-  git submodule update --init --recursive
+  git submodule update --init --recursive --progress
   ./bootstrap
   export CFLAGS=-DNO_TRUE_COLOURS=1 # Execute this line _only_ if your terminal doesn't support true colours
   export CC=clang CXX=clang++
