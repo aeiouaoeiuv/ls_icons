@@ -12,7 +12,7 @@ the structure 'file_matches' in 'src/ls-icons.c'.
 
 Here is how to use the branch of 'ls_icons':
 
-  sudo apt -y install clang autopoint bison gperf texinfo
+  sudo apt -y install clang autopoint bison gperf texinfo git autoconf automake gettext patch rsync wget make
   git submodule update --init --recursive --progress
   ./bootstrap
   export CFLAGS=-DNO_TRUE_COLOURS=1 # Execute this line _only_ if your terminal doesn't support true colours

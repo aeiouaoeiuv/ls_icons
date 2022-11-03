@@ -1,0 +1,8 @@
+services:
+  ubuntu:
+    tty: true
+    image: aeiouaoeiuv/ubuntu:ls_icons
+    container_name: ls_icons
+    user: $USER
+    volumes:
+      - $PWD:$HOME/ls_icons
