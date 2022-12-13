@@ -1,0 +1,36 @@
+name: auto build
+
+on:
+  push:
+    branches:
+      - ls_icons
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+    -
+      name: Checkout
+      uses: actions/checkout@v3
+    -
+      name: Setup Env
+      run: |
+        sudo apt-get update
+        sudo apt-get install clang autopoint bison gperf texinfo git autoconf automake gettext patch rsync wget make
+        git submodule update --init --recursive
+    -
+      name: Build
+      run: |
+        ./bootstrap
+        export CC=clang CXX=clang++
+        ./configure --prefix=${PWD}/install
+        make
+        make install
+    -
+      name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ls_binary
+        path: install/bin/ls
+
