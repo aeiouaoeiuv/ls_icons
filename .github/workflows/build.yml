@@ -8,29 +8,26 @@ on:
 jobs:
   build:
     runs-on: ubuntu-20.04
-
+    container:
+      image: aeiouaoeiuv/ubuntu:ls_icons
     steps:
-    -
-      name: Checkout
-      uses: actions/checkout@v3
-    -
-      name: Setup Env
-      run: |
-        sudo apt-get update
-        sudo apt-get install clang autopoint bison gperf texinfo git autoconf automake gettext patch rsync wget make
-        git submodule update --init --recursive
-    -
-      name: Build
-      run: |
-        ./bootstrap
-        export CC=clang CXX=clang++
-        ./configure --prefix=${PWD}/install
-        make
-        make install
-    -
-      name: Upload Artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: ls_binary
-        path: install/bin/ls
+      -
+        name: Checkout
+        uses: actions/checkout@v3
+      -
+        name: Build
+        run: |
+          git config --global --add safe.directory $PWD
+          git submodule update --init --recursive
+          ./bootstrap
+          export CC=clang CXX=clang++
+          FORCE_UNSAFE_CONFIGURE=1 ./configure --prefix=${PWD}/install
+          make
+          make install
+      -
+        name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ls_binary
+          path: install/bin/ls
 
