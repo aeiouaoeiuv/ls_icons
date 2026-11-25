@@ -4,25 +4,41 @@ on:
   push:
     branches:
       - ls_icons
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: aeiouaoeiuv/ubuntu:ls_icons
+      image: ubuntu:24.04
     steps:
+      -
+        name: Install dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential autoconf automake autopoint \
+            bison gettext gperf texinfo m4 perl patch rsync tar xz-utils zstd wget
       -
         name: Checkout
         uses: actions/checkout@v4
       -
+        name: Fetch gnulib
+        run: |
+          git config --global --add safe.directory '*'
+          # git.savannah.gnu.org often returns HTTP 500; use the GitHub mirror.
+          git config submodule.gnulib.url https://github.com/coreutils/gnulib.git
+          for i in 1 2 3; do
+            git submodule update --init --depth 1 gnulib && break
+            sleep 10
+          done
+          test -f gnulib/gnulib-tool
+      -
         name: Build
         run: |
-          git config --global --add safe.directory $PWD
-          git submodule update --init --recursive
-          ./bootstrap
-          export CC=clang CXX=clang++
+          ./bootstrap --skip-po
           FORCE_UNSAFE_CONFIGURE=1 ./configure --prefix=${PWD}/install
-          make
+          make -j$(nproc)
           make install
           strip install/bin/ls
       -
@@ -31,4 +47,3 @@ jobs:
         with:
           name: ls
           path: install/bin/ls
-

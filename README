@@ -23,7 +23,7 @@ Passing the font (needs python3-fonttools) also checks every icon exists in it.
 
 Here is how to use the branch of 'ls_icons':
 
-  sudo apt -y install clang autopoint bison gperf texinfo git autoconf automake gettext patch rsync wget make
+  sudo apt -y install build-essential autopoint bison gperf texinfo git autoconf automake gettext patch rsync wget make xz-utils zstd
   git submodule update --init --recursive --progress
   ./bootstrap
   export CFLAGS=-DNO_TRUE_COLOURS=1 # Execute this line _only_ if your terminal doesn't support true colours
