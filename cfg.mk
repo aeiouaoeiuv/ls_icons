@@ -1,5 +1,5 @@
 # Customize maint.mk                           -*- makefile -*-
-# Copyright (C) 2003-2021 Free Software Foundation, Inc.
+# Copyright (C) 2003-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -17,16 +17,18 @@
 # Used in maint.mk's web-manual rule
 manual_title = Core GNU utilities
 
+# Don't create node redirection files for each anchor
+gendocs_options_ = --common --no-node-files
+
 # Use the direct link.  This is guaranteed to work immediately, while
 # it can take a while for the faster mirror links to become usable.
 url_dir_list = https://ftp.gnu.org/gnu/$(PACKAGE)
 
 # Exclude bundled external projects from syntax checks
-VC_LIST_ALWAYS_EXCLUDE_REGEX = src/blake2/.*$$
+VC_LIST_ALWAYS_EXCLUDE_REGEX = src/(blake2/.*|longlong.h)$$
 
 # Tests not to run as part of "make distcheck".
 local-checks-to-skip = \
-  sc_proper_name_utf8_requires_ICONV \
   sc_indent
 
 # Tools used to bootstrap this package, used for "announcement".
@@ -49,13 +51,28 @@ export VERBOSE = yes
 # 4914152 9e
 export XZ_OPT = -8e
 
-old_NEWS_hash = ad874c61dc38785cb432159b725fc3de
+# -T0 uses all CPUs,
+# -18 output is only 2% larger but compresses twice as fast as -19
+# Tested with:
+#   for t in '' '-T0'; do for l in $(seq 15 19); do
+#     echo == $t -$l ==; env time -f 'elapsed=%E CPU=%Us Mem=%MKB' \
+#      zstd -c $t -$l < coreutils-9.12.tar | wc -c
+#   done; done
+export ZSTD_OPT = -T0 -18
+
+old_NEWS_hash = e5b3fbccdfc6532ed730d73ee198db29
 
 # Add an exemption for sc_makefile_at_at_check.
-_makefile_at_at_check_exceptions = ' && !/^cu_install_prog/ && !/dynamic-dep/'
+_makefile_at_at_check_exceptions = \
+  ' && !/MAKEINFO/ && !/^cu_install_prog/ && !/dynamic-dep/'
 
 # Our help-version script is in a slightly different location.
 _hv_file ?= $(srcdir)/tests/misc/help-version
+
+world:
+	./bootstrap && \
+	./configure --quiet && \
+	$(MAKE) $(AM_MAKEFLAGS) -j $$(nproc 2>/dev/null || echo 1)
 
 # Ensure that the list of O_ symbols used to compute O_FULLBLOCK is complete.
 dd = $(srcdir)/src/dd.c
@@ -63,7 +80,8 @@ sc_dd_O_FLAGS:
 	@rm -f $@.1 $@.2
 	@{ echo O_FULLBLOCK; echo O_NOCACHE;				\
 	  perl -nle '/^ +\| (O_\w*)$$/ and print $$1' $(dd); } | sort > $@.1
-	@{ echo O_NOFOLLOW; perl -nle '/{"[a-z]+",\s*(O_\w+)},/ and print $$1' \
+	@{ echo O_NOFOLLOW; echo O_EXCL;				\
+	   perl -nle '/{"[a-z]+",\s*(O_\w+)},/ and print $$1'		\
 	  $(dd); } | sort > $@.2
 	@diff -u $@.1 $@.2; diff=$$?;					\
 	rm -f $@.1 $@.2;						\
@@ -76,8 +94,8 @@ sc_dd_O_FLAGS:
 dd_c = $(srcdir)/src/dd.c
 sc_dd_max_sym_length:
 ifneq ($(wildcard $(dd_c)),)
-	@len=$$( (sed -n '/conversions\[\] =$$/,/^};/p' $(dd_c);\
-		 sed -n '/flags\[\] =$$/,/^};/p' $(dd_c) )	\
+	@len=$$( (sed -n '/conversions\[] =$$/,/^};/p' $(dd_c);\
+		 sed -n '/flags\[] =$$/,/^};/p' $(dd_c) )	\
 		|sed -n '/"/s/^[^"]*"\([^"]*\)".*/\1/p'| wc -L);\
 	max=$$(sed -n '/^#define LONGEST_SYMBOL /s///p' $(dd_c)	\
 	      |tr -d '"' | wc -L);		\
@@ -116,7 +134,7 @@ sc_tests_list_consistency:
 	  cd $(top_srcdir);						\
 	  $(SHELL) build-aux/vc-list-files tests			\
 	    | grep -Ev '^tests/(factor/(run|create-test)|init)\.sh$$'	\
-	    | $(EGREP) "$$test_extensions_rx\$$";			\
+	    | grep -E "($$test_extensions_rx)$$";			\
 	} | sort | uniq -u | grep . && exit 1; :
 
 # Ensure that all version-controlled test scripts are executable.
@@ -139,9 +157,10 @@ sc_ensure_gl_diffs_apply_cleanly:
 	done
 
 # Avoid :>file which doesn't propagate errors
+# Also  :>file was seen to trigger EXIT trap on cygwin
 sc_prohibit_colon_redirection:
-	@cd $(srcdir)/tests && GIT_PAGER= git grep -En ': *>.*\|\|'	\
-	  && { echo '$(ME): '"The leading colon in :> will hide errors" >&2; \
+	@cd $(srcdir)/tests && GIT_PAGER= git grep -En ': *>[^>]'	\
+	  && { echo '$(ME): '":> will hide errors or may trigger EXIT" >&2; \
 	       exit 1; }  \
 	  || :
 
@@ -189,12 +208,15 @@ sc_prohibit_quotes_notation:
 	       exit 1; }  \
 	  || :
 
+error_fns = (error|diagnose)
+
 # Files in src/ should quote all strings in error() output, so that
 # unexpected input chars like \r etc. don't corrupt the error.
 # In edge cases this can be avoided by putting the format string
-# on a separate line to the following arguments.
+# on a separate line to the arguments, or the arguments in parenthesis.
 sc_error_quotes:
-	@cd $(srcdir)/src && GIT_PAGER= git grep -n 'error *(.*%s.*, [^(]*);$$'\
+	@cd $(srcdir)/src \
+	  && GIT_PAGER= git grep -E -n '$(error_fns) *\(.*%s.*, [^(]*\);$$' \
 	  *.c | grep -v ', q' \
 	  && { echo '$(ME): '"Use quote() for error string arguments" 1>&2; \
 	       exit 1; }  \
@@ -206,7 +228,7 @@ sc_error_quotes:
 sc_error_shell_quotes:
 	@cd $(srcdir)/src && \
 	  { GIT_PAGER= git grep -E \
-	    'error \(.*%s[:"], .*(name|file)[^"]*\);$$' *.c; \
+	    '$(error_fns) \(.*%s[:"], .*(name|file)[^"]*\);$$' *.c; \
 	    GIT_PAGER= git grep -E \
 	    ' quote[ _].*file' *.c; } \
 	  | grep -Ev '(quotef|q[^ ]*name)' \
@@ -220,24 +242,14 @@ sc_error_shell_quotes:
 # to provide better support for copy and paste.
 sc_error_shell_always_quotes:
 	@cd $(srcdir)/src && GIT_PAGER= git grep -E \
-	    'error \(.*[^:] %s[ "].*, .*(name|file)[^"]*\);$$' \
+	    '$(error_fns) \(.*[^:] %s[ "].*, .*(name|file)[^"]*\);$$' \
 	    *.c | grep -Ev '(quoteaf|q[^ ]*name)' \
 	  && { echo '$(ME): '"Use quoteaf() for space delimited names" 1>&2; \
 	       exit 1; }  \
 	  || :
 	@cd $(srcdir)/src && GIT_PAGER= git grep -E -A1 \
-	    'error \([^%]*[^:] %s[ "]' *.c | grep 'quotef' \
+	    '$(error_fns) \([^%]*[^:] %s[ "]' *.c | grep 'quotef' \
 	  && { echo '$(ME): '"Use quoteaf() for space delimited names" 1>&2; \
-	       exit 1; }  \
-	  || :
-
-# Usage of error() with an exit constant, should instead use die(),
-# as that avoids warnings and may generate better code, due to being apparent
-# to the compiler that it doesn't return.
-sc_die_EXIT_FAILURE:
-	@cd $(srcdir)/src && GIT_PAGER= git grep -E \
-	    'error \(.*_(FAILURE|INVALID)' \
-	  && { echo '$(ME): '"Use die() instead of error" 1>&2; \
 	       exit 1; }  \
 	  || :
 
@@ -295,27 +307,6 @@ sc_check-AUTHORS: $(all_programs)
 	  && diff $(au_actual) $(au_dotdot) \
 	  && rm -f $(au_actual) $(au_dotdot)
 
-# Each program with a non-ASCII author name must link with LIBICONV.
-sc_check-I18N-AUTHORS:
-	@cd $(srcdir)/src &&						\
-	  for i in $$(git grep -l -w proper_name_utf8 *.c|sed 's/\.c//'); do \
-	    grep -E "^src_$${i}_LDADD"' .?= .*\$$\(LIBICONV\)' local.mk	\
-		> /dev/null						\
-	      || { echo "$(ME): link rules for $$i do not include"	\
-		    '$$(LIBICONV)' 1>&2; exit 1; };			\
-	  done
-
-# Disallow the C99 printf size specifiers %z and %j as they're not portable.
-# The gnulib printf replacement does support them, however the printf
-# replacement is not currently explicitly depended on by the gnulib error()
-# module for example.  Also we use fprintf() in a few places to output simple
-# formats but don't use the gnulib module as it is seen as overkill at present.
-# We'd have to adjust the above gnulib items before disabling this.
-sc_prohibit-c99-printf-format:
-	@cd $(srcdir)/src && GIT_PAGER= git grep -n '%[0*]*[jz][udx]' *.c    \
-	  && { echo '$(ME): Use PRI*MAX instead of %j or %z' 1>&2; exit 1; } \
-	  || :
-
 # Ensure the alternative __attribute (keyword) form isn't used as
 # that form is not elided where required.  Also ensure that we don't
 # directly use attributes already defined by gnulib.
@@ -324,6 +315,20 @@ sc_prohibit-gl-attributes:
 	@prohibit='__attribute |__(unused|pure|const)__'	\
 	in_vc_files='\.[ch]$$'					\
 	halt='Use _GL... attribute macros'			\
+	  $(_sc_search_regexp)
+
+# Ensure that <attributes.h> macros are used in .c files.
+sc_prohibit-_gl-attributes:
+	@prohibit='_GL_ATTRIBUTE'				\
+	in_vc_files='\.c$$'					\
+	halt='Use ATTRIBUTE_... instead of _GL_ATTRIBUTE_...'	\
+	  $(_sc_search_regexp)
+
+# Prefer the STRUCT_UTMP typedef over struct gl_utmp.
+sc_prohibit-struct-gl_utmp:
+	@prohibit='struct gl_utmp'				\
+	in_vc_files='\.[ch]$$'					\
+	halt='Use STRUCT_UTMP, not struct gl_utmp'		\
 	  $(_sc_search_regexp)
 
 # Prefer the const declaration form, with const following the type
@@ -343,7 +348,7 @@ FILTER_LONG_LINES =						\
   \|^[^:]*NEWS:.*https\{,1\}://| d;					\
   \|^[^:]*doc/fdl.texi:| d;					\
   \|^[^:]*man/help2man:| d;					\
-  \|^[^:]*tests/misc/sha[0-9]*sum.*\.pl[-:]| d;			\
+  \|^[^:]*tests/cksum/sha[0-9]*sum.*\.pl[-:]| d;			\
   \|^[^:]*tests/pr/|{ \|^[^:]*tests/pr/pr-tests:| !d; };
 sc_long_lines:
 	@wc -L /dev/null >/dev/null 2>/dev/null				\
@@ -358,6 +363,14 @@ sc_long_lines:
 	  sed -e "s|^|$$file:|" -e '$(FILTER_LONG_LINES)';		\
 	done | grep . && { msg="$$halt" $(_sc_say_and_exit) } || :
 
+sc_standard_outputs: $(ALL_MANS)
+	@grep -E 'std(in|out|err)' man/*.1 doc/*.texi			 \
+	  && { echo 1>&2 '$@: use "standard ....." in user docs'; exit 1; } || :
+	@grep -E '[Ss]tandard (in|out|err)([^op]|$$)' man/*.1 doc/*.texi \
+	  && { echo 1>&2 '$@: use "standard ..put" in user docs'; exit 1; } || :
+	@grep -E '_\("[^"]*std(in|out|err)' src/*.c \
+	  && { echo 1>&2 '$@: use "standard ..put" in messages'; exit 1; } || :
+
 # Option descriptions should not start with a capital letter.
 # One could grep source directly as follows:
 # grep -E " {2,6}-.*[^.]  [A-Z][a-z]" $$($(VC_LIST_EXCEPT) | grep '\.c$$')
@@ -365,6 +378,16 @@ sc_long_lines:
 sc_option_desc_uppercase: $(ALL_MANS)
 	@grep '^\\fB\\-' -A1 man/*.1 | LC_ALL=C grep '\.1.[A-Z][a-z]'	\
 	  && { echo 1>&2 '$@: found initial capitals in --help'; exit 1; } || :
+
+# '--' should not be treated as '–' (U+2013 EN DASH) in long option names.
+sc_texi_long_option_escaped: doc/coreutils.info
+	@grep ' –[^ ]' '$<'						\
+	  && { echo 1>&2 '$@: found unquoted --long-option'; exit 1; } || :
+
+# pdf (and dvi) generation requires explicit empty args (trailing comma)
+sc_texi_ensure_empty_option_args:
+	@grep '^@optItem[^,]*,[^,]*$$' doc/*.texi && { echo 1>&2 \
+	  '$@: Use explicit empty argument to @optItem[x]'; exit 1; } || :
 
 # Ensure all man/*.[1x] files are present.
 sc_man_file_correlation: check-x-vs-1 check-programs-vs-x
@@ -441,15 +464,13 @@ sc_prohibit_operator_at_end_of_line:
 	halt='found operator at end of line'				\
 	  $(_sc_search_regexp)
 
-# Don't use "readlink" or "readlinkat" directly
-sc_prohibit_readlink:
-	@prohibit='\<readlink(at)? \('					\
-	halt='do not use readlink(at); use via xreadlink or areadlink*'	\
-	  $(_sc_search_regexp)
+# Partial substitutes for GNU extensions \< and \> in regexps.
+begword = (^|[^_[:alnum:]])
+endword = ($$|[^_[:alnum:]])
 
 # Don't use address of "stat" or "lstat" functions
 sc_prohibit_stat_macro_address:
-	@prohibit='\<l?stat '':|&l?stat\>'				\
+	@prohibit='$(begword)l?stat '':|&l?stat$(endword)'		\
 	halt='stat() and lstat() may be function-like macros'		\
 	  $(_sc_search_regexp)
 
@@ -502,9 +523,21 @@ sc_ensure_comma_after_id_est:
 # a period.  Check the first line after each "SEE ALSO" line in man/*.x:
 sc_prohibit_man_see_also_period:
 	@grep -nB1 '\.$$' $$($(VC_LIST_EXCEPT) | grep 'man/.*\.x$$')	\
-	    | grep -A1 -e '-\[SEE ALSO\]' | grep '\.$$' &&		\
+	    | grep -A1 -e '-\[SEE ALSO]' | grep '\.$$' &&		\
 	  { echo '$(ME): do not end "SEE ALSO" section with a period'	\
 	      1>&2; exit 1; } || :
+
+sc_prohibit_exit_write_error:
+	@prohibit='error.*EXIT_FAILURE.*write error' \
+	in_vc_files='\.c$$' \
+	halt='Use write_error() instead' \
+	  $(_sc_search_regexp)
+
+sc_prohibit_bare_set:
+	@prohibit='^ *set [`$$]'					\
+	in_vc_files='\.sh$$'						\
+	halt='use set -- $$args instead of set $$args'			\
+	  $(_sc_search_regexp)
 
 # Don't use "indent-tabs-mode: nil" anymore.  No longer needed.
 sc_prohibit_emacs__indent_tabs_mode__setting:
@@ -514,7 +547,7 @@ sc_prohibit_emacs__indent_tabs_mode__setting:
 
 # Ensure that tests don't include a redundant fail=0.
 sc_prohibit_fail_0:
-	@prohibit='\<fail=0\>'						\
+	@prohibit='$(begword)fail=0$(endword)'				\
 	halt='fail=0 initialization'					\
 	  $(_sc_search_regexp)
 
@@ -551,18 +584,43 @@ sc_prohibit_env_returns:
 # setfacl reject it with: "Unrecognized character found in mode field".
 # Use hyphens to give it a length of 3: "...:rw-" or "...:r--".
 sc_prohibit_short_facl_mode_spec:
-	@prohibit='\<setfacl .*-m.*:.*:[rwx-]{1,2} '			\
+	@prohibit='$(begword)setfacl .*-m.*:.*:[rwx-]{1,2} '		\
 	halt='setfacl mode string length < 3; extend with hyphen(s)'	\
 	  $(_sc_search_regexp)
 
 # Ensure that "stdio--.h" is used where appropriate.
 sc_require_stdio_safer:
 	@if $(VC_LIST_EXCEPT) | grep -l '\.[ch]$$' > /dev/null; then	\
-	  files=$$(grep -l '\bfreopen \?(' $$($(VC_LIST_EXCEPT)		\
+	  files=$$(grep -El '$(begword)freopen ?\(' $$($(VC_LIST_EXCEPT)\
 	      | grep '\.[ch]$$'));					\
 	  test -n "$$files" && grep -LE 'include "stdio--.h"' $$files	\
 	      | grep . &&						\
 	  { echo '$(ME): the above files should use "stdio--.h"'	\
+		1>&2; exit 1; } || :;					\
+	else :;								\
+	fi
+
+# Ensure that "stdlib--.h" is used where appropriate.
+sc_require_stdlib_safer:
+	@if $(VC_LIST_EXCEPT) | grep -l '\.[ch]$$' > /dev/null; then	\
+	  files=$$(grep -El '$(begword)mkstemp ?\(' $$($(VC_LIST_EXCEPT)\
+	      | grep '\.[ch]$$'));					\
+	  test -n "$$files" && grep -LE 'include "stdlib--.h"' $$files	\
+	      | grep . &&						\
+	  { echo '$(ME): the above files should use "stdlib--.h"'	\
+		1>&2; exit 1; } || :;					\
+	else :;								\
+	fi
+
+# Ensure that "unistd--.h" is used where appropriate.
+sc_require_unistd_safer:
+	@if $(VC_LIST_EXCEPT) | grep -l '\.[ch]$$' > /dev/null; then	\
+	  files=$$(grep -El '$(begword)(pipe2?|dup[23]?) ?\('		\
+		   $$($(VC_LIST_EXCEPT)					\
+	      | grep '\.[ch]$$'));					\
+	  test -n "$$files" && grep -LE 'include "unistd--.h"' $$files	\
+	      | grep . &&						\
+	  { echo '$(ME): the above files should use "unistd--.h"'	\
 		1>&2; exit 1; } || :;					\
 	else :;								\
 	fi
@@ -574,7 +632,7 @@ sc_prohibit_perl_hash_quotes:
 
 # Prefer xnanosleep over other less-precise sleep methods
 sc_prohibit_sleep:
-	@prohibit='\<(nano|u)?sleep \('					\
+	@prohibit='$(begword)(nano|u)?sleep \('				\
 	halt='prefer xnanosleep over other sleep interfaces'		\
 	  $(_sc_search_regexp)
 
@@ -593,14 +651,20 @@ sc_env_test_dependencies:
 		grep -vF '[' |paste -d'|' -s))" tests | \
 	    sed "s/\([^:]\):.*env \([^)' ]*\).*/\1 \2/" | uniq | \
 	    while read test prog; do \
-	      printf '%s' $$test | grep -q '\.pl$$' && continue; \
-	      grep -q "print_ver_.* $$prog" $$test \
+	      printf '%s' $$test | grep '\.pl$$' >/dev/null && continue; \
+	      grep "print_ver_.* $$prog" $$test >/dev/null \
 		|| echo $$test should call: print_ver_ $$prog; \
 	    done | grep . && exit 1 || :
 
+# Enforce using our printf if using \u or \x
+sc_env_printf:
+	@cd $(top_srcdir) && GIT_PAGER= git grep 'printf.*[^\\]\\[ux]' tests \
+	  | grep -v -- '--printf' | grep -v 'env printf' \
+	  && { echo 'use "env printf" with \x or \u'; exit 1; } || :
+
 # Use framework_failure_, not the old name without the trailing underscore.
 sc_prohibit_framework_failure:
-	@prohibit='\<framework_''failure\>'				\
+	@prohibit='$(begword)framework_''failure$(endword)'		\
 	halt='use framework_failure_ instead'				\
 	  $(_sc_search_regexp)
 
@@ -612,6 +676,7 @@ sc_prohibit_test_backticks:
 
 # Ensure that compare is used to check empty files
 # so that the unexpected contents are displayed
+# Use `returns_ 1 test -s ... || fail=1` to avoid this check.
 sc_prohibit_test_empty:
 	@prohibit='test -s.*&&' in_vc_files='^tests/'			\
 	halt='use `compare /dev/null ...`, not `test -s ...` in tests/'	\
@@ -623,7 +688,8 @@ sc_prohibit_test_empty:
 sc_some_programs_must_avoid_exit_failure:
 	@cd $(srcdir)							\
 	&& grep -nw EXIT_FAILURE					\
-	    $$(git grep -El '[^T]_FAILURE|EXIT_CANCELED' $(srcdir)/src)	\
+	    $$(git grep -El '[^T]_FAILURE|EXIT_CANCELED' src/)		\
+	  | grep -v '^src/system\.h:'					\
 	  | grep -vE '= EXIT_FAILURE|return .* \?' | grep .		\
 	    && { echo '$(ME): do not use EXIT_FAILURE in the above'	\
 		  1>&2; exit 1; } || :
@@ -651,7 +717,7 @@ sc_prohibit_test_calls_print_ver_with_irrelevant_argument:
 	      while read file name; do					\
 		for i in $$name; do					\
 		  case "$$i" in install) i=ginstall;; esac;		\
-		  grep -w "$$i" $$file|grep -vw print_ver_|grep -q .	\
+		  grep -w "$$i" $$file|grep -vw print_ver_|grep . >/dev/null \
 		    || { fail=1;					\
 			 echo "*** Test: $$file, offending: $$i." 1>&2; };\
 		done;							\
@@ -740,6 +806,12 @@ sc_prohibit_strncmp:
 	halt='use STREQ_LEN or STRPREFIX instead of str''ncmp'		\
 	  $(_sc_search_regexp)
 
+# Prefer memeq() to memcmp() where appropriate
+sc_prohibit_memcmp:
+	@prohibit='^[^#].*memcmp *\(.*= 0'				\
+	halt='use memeq() instead of memcmp() =='			\
+	  $(_sc_search_regexp)
+
 # Enforce recommended preprocessor indentation style.
 sc_preprocessor_indentation:
 	@if cppi --version >/dev/null 2>&1; then			\
@@ -784,7 +856,7 @@ sc_THANKS_in_sorted:
 # Look for developer diagnostics that are marked for translation.
 # This won't find any for which devmsg's format string is on a separate line.
 sc_marked_devdiagnostics:
-	@prohibit='\<devmsg *\(.*_\('                                   \
+	@prohibit='$(begword)devmsg *\(.*_\('				\
 	halt='found marked developer diagnostic(s)'                     \
 	  $(_sc_search_regexp)
 
@@ -801,7 +873,8 @@ sc_fs-magic-compare:
 sc_gitignore_missing:
 	@{ sed -n '/^\/lib\/.*\.h$$/{p;p}' $(srcdir)/.gitignore;	\
 	    find lib -name '*.in*' ! -name '*~' ! -name 'sys_*' |	\
-	      sed 's|^|/|; s|_\(.*in\.h\)|/\1|; s/\.in//'; } |		\
+	      sed 's|^|/|; s|_\(.*in\.h\)|/\1|; s/\.in//' |		\
+	      sed 's|/fts\.h$$|/fts_.h|'; } |				\
 	      sort | uniq -u | grep . && { echo '$(ME): Add above'	\
 		'entries to .gitignore' >&2; exit 1; } || :
 
@@ -814,15 +887,43 @@ sc_gitignore_missing:
 #	    sort | uniq -d | grep . && { echo '$(ME): Remove above'	\
 #	      'entries from .gitignore' >&2; exit 1; } || :
 
+# Ensure gl/ files are distributed
+sc_gldist_missing:
+	@cd $(srcdir);							\
+	grep '^gl/' gl/local.mk > $@.a;					\
+	find gl '(' -name Makefile.am ')' -prune -o -type f		\
+		'!' '(' -name '*.orig' -or -name '*~' -or		\
+		        -name 'ChangeLog.*' ')' -printf '%p\n' |	\
+	LC_ALL=C sort | tr '\012' @ | sed 's/@$$/%/;s/@/ \\@/g' |	\
+	tr @% '\012\012' > $@.e;					\
+	diff -u $@.a $@.e; diff=$$?;					\
+	rm -f $@.a $@.e;						\
+	test "$$diff" = 0						\
+	  || { echo '$(ME): Inconsistent EXTRA_DIST in gl/local.mk'>&2;	\
+	       exit 1; }
+
 sc_prohibit-form-feed:
 	@prohibit=$$'\f' \
 	in_vc_files='\.[chly]$$' \
 	halt='Form Feed (^L) detected' \
 	  $(_sc_search_regexp)
 
+# debbugs.gnu.org/cgi/bugreport.cgi?bug=... ->   bugs.gnu.org/...
+# bugzilla.redhat.com/show_bug.cgi?id=... ->     bugzilla.redhat.com/...
+# sourceware.org/bugzilla/show_bug.cgi?id=... -> sourceware.org/PR...
+# gcc.gnu.org/bugzilla/show_bug.cgi?id=... ->    gcc.gnu.org/PR...
+sc_prohibit-long-form-bug-urls:
+	@prohibit='http.*(bugreport|show_bug)\.cgi' \
+	halt='use short form bug url' \
+	  $(_sc_search_regexp)
+
 # Override the default Cc: used in generating an announcement.
 announcement_Cc_ = $(translation_project_), \
   coreutils@gnu.org, coreutils-announce@gnu.org
+
+# Write cksum supported checksums into the announcement.
+# I.e., base64 to reduce space, and possibly tagged to ease usage.
+announce_gen_args = --cksum-checksums
 
 -include $(srcdir)/dist-check.mk
 
@@ -833,15 +934,19 @@ update-copyright-env = \
 
 # List syntax-check exemptions.
 exclude_file_name_regexp--sc_space_tab = \
-  ^(tests/pr/|tests/misc/nl\.sh$$|gl/.*\.diff$$|man/help2man$$)
+  ^(tests/pr/|tests/nl/nl\.sh$$|gl/.*\.diff$$|man/help2man$$)
 exclude_file_name_regexp--sc_bindtextdomain = \
-  ^(gl/.*|lib/euidaccess-stat|src/make-prime-list|src/cksum)\.c$$
+  ^(gl/.*|lib/euidaccess-stat|src/make-prime-list|src/cksum_crc)\.c$$
 exclude_file_name_regexp--sc_trailing_blank = \
   ^(tests/pr/|gl/.*\.diff$$|man/help2man)
+_x_system_h := (system|copy|chown-core|find-mount-point)\.h
+_x_system_c := (libstdbuf|make-prime-list)\.c
 exclude_file_name_regexp--sc_system_h_headers = \
-  ^src/((die|system|copy|find-mount-point)\.h|make-prime-list\.c)$$
+  ^src/($(_x_system_h)|$(_x_system_c))$$
 
-_src = (crctab|false|lbracket|ls-(dir|ls|vdir)|tac-pipe|uname-(arch|uname))
+_src := (false|chown-(chgrp|chown)
+_src := $(_src)|ls-(dir|ls|vdir)|make-prime-list|tac-pipe|test-(lbracket|test)
+_src := $(_src)|true-(false|true)|uname-(arch|uname))
 _gl_src = (xdecto.max|cl-strtold)
 exclude_file_name_regexp--sc_require_config_h_first = \
   (^lib/buffer-lcm\.c|gl/lib/$(_gl_src)\.c|src/$(_src)\.c)$$
@@ -860,7 +965,7 @@ exclude_file_name_regexp--sc_prohibit_always_true_header_tests = \
   ^m4/stat-prog\.m4$$
 exclude_file_name_regexp--sc_prohibit_fail_0 = \
   (^.*/git-hooks/commit-msg|^tests/init\.sh|Makefile\.am|\.mk|.*\.texi)$$
-exclude_file_name_regexp--sc_prohibit_test_minus_ao = *\.texi$$
+exclude_file_name_regexp--sc_prohibit_test_minus_ao = NEWS|doc/.*\.texi$$
 exclude_file_name_regexp--sc_prohibit_atoi_atof = ^lib/euidaccess-stat\.c$$
 
 # longlong.h is maintained elsewhere.
@@ -868,22 +973,24 @@ _ll = ^src/longlong\.h$$
 exclude_file_name_regexp--sc_useless_cpp_parens = $(_ll)
 exclude_file_name_regexp--sc_space_before_open_paren = $(_ll)
 
-tbi_1 = ^tests/pr/|(\.mk|^man/help2man)$$
+tbi_1 = ^tests/pr/|(\.mk|^gl/.*\.diff|^man/help2man)$$
 tbi_2 = ^scripts/git-hooks/(pre-commit|pre-applypatch|applypatch-msg)$$
 tbi_3 = (GNU)?[Mm]akefile(\.am)?$$|$(_ll)
 exclude_file_name_regexp--sc_prohibit_tab_based_indentation = \
   $(tbi_1)|$(tbi_2)|$(tbi_3)
 
 exclude_file_name_regexp--sc_preprocessor_indentation = \
-  ^(gl/lib/rand-isaac\.[ch]|gl/tests/test-rand-isaac\.c)$$|$(_ll)
+  ^(gl/lib/(rand-isaac|mbbuf|utf8)\.[ch]|gl/tests/test-rand-isaac\.c)$$|$(_ll)
 exclude_file_name_regexp--sc_prohibit_stat_st_blocks = \
   ^(src/system\.h|tests/du/2g\.sh)$$
 
 exclude_file_name_regexp--sc_prohibit_continued_string_alpha_in_column_1 = \
   ^src/(system\.h|od\.c|printf\.c|getlimits\.c)$$
 
+_cksum = ^tests/cksum/cksum-base64\.pl$$
+_tb_misc = misc/(exec-bad-unicode|stdbuf|responsive)
 exclude_file_name_regexp--sc_prohibit_test_backticks = \
-  ^tests/(local\.mk|(init|misc/stdbuf|factor/create-test)\.sh)$$
+  ^tests/(local\.mk|(init|$(_tb_misc)|factor/create-test)\.sh)$$|$(_cksum)
 
 # Exempt test.c, since it's nominally shared, and relatively static.
 exclude_file_name_regexp--sc_prohibit_operator_at_end_of_line = \
@@ -892,13 +999,19 @@ exclude_file_name_regexp--sc_prohibit_operator_at_end_of_line = \
 exclude_file_name_regexp--sc_error_message_uppercase = ^src/factor\.c$$
 exclude_file_name_regexp--sc_prohibit_atoi_atof = ^src/make-prime-list\.c$$
 
-# Exception here as we don't want __attribute elided on non GCC
-exclude_file_name_regexp--sc_prohibit-gl-attributes = ^src/libstdbuf\.c$$
+# Exception here as we don't want __attribute elided on non GCC for stdbuf
+# and we don't want to depend on gnulib for make-prime-list
+exclude_file_name_regexp--sc_prohibit-gl-attributes = \
+  ^src/(make-prime-list|libstdbuf)\.c$$
 
 exclude_file_name_regexp--sc_prohibit_uppercase_id_est = \.diff$$
 exclude_file_name_regexp--sc_ensure_dblspace_after_dot_before_id_est = \.diff$$
 exclude_file_name_regexp--sc_ensure_comma_after_id_est = \.diff|$(_ll)$$
-exclude_file_name_regexp--sc_long_lines = \.diff$$|$(_ll)
+exclude_file_name_regexp--sc_long_lines = \.diff$$|$(_ll)|$(_cksum)|bootstrap
+
+# `grep . -q` is not exactly equivalent to `grep . >/dev/null`
+# and this difference is significant in the NEWS description
+exclude_file_name_regexp--sc_unportable_grep_q = NEWS
 
 # Augment AM_CFLAGS to include our per-directory options:
 AM_CFLAGS += $($(@D)_CFLAGS)
@@ -917,10 +1030,16 @@ _gl_TS_unmarked_extern_functions = main usage
 _gl_TS_unmarked_extern_functions += single_binary_main_.* _usage_.*
 # Headers to search for single line extern _data_ declarations.
 _gl_TS_other_headers = $(srcdir)/src/*.h src/*.h
-# Tell the tight_scope rule about an exceptional "extern" variable.
-# Normally, the rule would detect its declaration, but that uses a
-# different name, __clz_tab.
-_gl_TS_unmarked_extern_vars = factor_clz_tab
+# Avoid tight_scope rule stating these should be static
+# as there is no way to achieve that with the way these are defined.
+_gl_TS_unmarked_extern_vars = ptr_MD5_.*
 # Other tight_scope settings
 _gl_TS_dir = .
 _gl_TS_obj_files = src/*.$(OBJEXT)
+# Settings for running codespell.
+csiwl_1 = debbugs,clen,te,bu,shs,linke,fo,souch,inout,outin
+csiwl_2 = kno,ois,afile,whats,hda,indx,ot,nam,ist
+codespell_ignore_words_list = $(csiwl_1),$(csiwl_2)
+exclude_file_name_regexp--sc_codespell = \
+  ^(THANKS\.in|tests/pr/.*(F|tn?|l(o|m|i)|bl))$$
+exclude_file_name_regexp--sc_GPL_version = ^(gl/lib/(mbbuf|utf8)\.[hc])$$

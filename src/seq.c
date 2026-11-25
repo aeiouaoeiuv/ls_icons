@@ -1,5 +1,5 @@
 /* seq - print sequence of numbers to standard output.
-   Copyright (C) 1994-2021 Free Software Foundation, Inc.
+   Copyright (C) 1994-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,11 +22,12 @@
 #include <sys/types.h>
 
 #include "system.h"
-#include "die.h"
+#include "c-ctype.h"
 #include "cl-strtod.h"
-#include "error.h"
+#include "full-write.h"
 #include "quote.h"
 #include "xstrtod.h"
+#include "xvasprintf.h"
 
 /* Roll our own isfinite/isnan rather than using <math.h>, so that we don't
    have to worry about linking -lm just for isfinite.  */
@@ -50,11 +51,14 @@
 /* True if the locale settings were honored.  */
 static bool locale_ok;
 
+/* The locale's decimal point, or "." if it is empty.  */
+static char const *locale_point;
+
 /* If true print all number with equal width.  */
 static bool equal_width;
 
 /* The string used to separate two numbers.  */
-static char const *separator;
+static char const *separator = "\n";
 
 /* The string output after all numbers have been output.
    Usually "\n" or "\0".  */
@@ -88,13 +92,20 @@ Print numbers from FIRST to LAST, in steps of INCREMENT.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-  -f, --format=FORMAT      use printf style floating-point FORMAT\n\
-  -s, --separator=STRING   use STRING to separate numbers (default: \\n)\n\
-  -w, --equal-width        equalize width by padding with leading zeroes\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -f, --format=FORMAT\n\
+         use printf style floating-point FORMAT\n\
+"));
+      oputs (_("\
+  -s, --separator=STRING\n\
+         use STRING to separate numbers (default: \\n)\n\
+"));
+      oputs (_("\
+  -w, --equal-width\n\
+         equalize width by padding with leading zeroes\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
 If FIRST or INCREMENT is omitted, it defaults to 1.  That is, an\n\
@@ -171,9 +182,17 @@ scan_arg (char const *arg)
   ret.width = 0;
   ret.precision = INT_MAX;
 
-  /* Use no precision (and possibly fast generation) for integers.  */
+  /* Like cl_strtold, accept '.' or the current locale's decimal point.  */
   char const *decimal_point = strchr (arg, '.');
-  if (! decimal_point && ! strchr (arg, 'p') /* not a hex float */)
+  idx_t decimal_point_len = 1;
+  if (! decimal_point)
+    {
+      decimal_point = strstr (arg, locale_point);
+      decimal_point_len = strlen (locale_point);
+    }
+
+  /* Use no precision (and possibly fast generation) for integers.  */
+  if (! decimal_point && ! strpbrk (arg, "pP") /* not a hex float */)
     ret.precision = 0;
 
   /* auto set width and precision for decimal inputs.  */
@@ -184,13 +203,15 @@ scan_arg (char const *arg)
 
       if (decimal_point)
         {
-          fraction_len = strcspn (decimal_point + 1, "eE");
+          fraction_len = strcspn (decimal_point + decimal_point_len, "eE");
           if (fraction_len <= INT_MAX)
             ret.precision = fraction_len;
-          ret.width += (fraction_len == 0                      /* #.  -> #   */
+          /* printf counts a multi-byte decimal point as a single column.  */
+          ret.width -= decimal_point_len - 1;
+          ret.width += (fraction_len == 0                       /* #.  -> #   */
                         ? -1
-                        : (decimal_point == arg                /* .#  -> 0.# */
-                           || ! ISDIGIT (decimal_point[-1]))); /* -.# -> 0.# */
+                        : (decimal_point == arg                 /* .#  -> 0.# */
+                           || !c_isdigit (decimal_point[-1]))); /* -.# -> 0.# */
         }
       char const *e = strchr (arg, 'e');
       if (! e)
@@ -198,8 +219,10 @@ scan_arg (char const *arg)
       if (e)
         {
           long exponent = MAX (strtol (e + 1, NULL, 10), -LONG_MAX);
-          ret.precision += exponent < 0 ? -exponent
-                                        : - MIN (ret.precision, exponent);
+          /* Saturate at INT_MAX, i.e., treat the precision as unknown.  */
+          ret.precision += (exponent < 0
+                            ? MIN (-exponent, INT_MAX - ret.precision)
+                            : - MIN (ret.precision, exponent));
           /* Don't account for e.... in the width since this is not output.  */
           ret.width -= strlen (arg) - (e - arg);
           /* Adjust the width as per the exponent.  */
@@ -207,7 +230,7 @@ scan_arg (char const *arg)
             {
               if (decimal_point)
                 {
-                  if (e == decimal_point + 1) /* undo #. -> # above  */
+                  if (fraction_len == 0) /* undo #. -> # above  */
                     ret.width++;
                 }
               else
@@ -237,15 +260,12 @@ long_double_format (char const *fmt, struct layout *layout)
 {
   size_t i;
   size_t prefix_len = 0;
-  size_t suffix_len = 0;
-  size_t length_modifier_offset;
-  bool has_L;
 
   for (i = 0; ! (fmt[i] == '%' && fmt[i + 1] != '%'); i += (fmt[i] == '%') + 1)
     {
       if (!fmt[i])
-        die (EXIT_FAILURE, 0,
-             _("format %s has no %% directive"), quote (fmt));
+        error (EXIT_FAILURE, 0,
+               _("format %s has no %% directive"), quote (fmt));
       prefix_len++;
     }
 
@@ -258,19 +278,20 @@ long_double_format (char const *fmt, struct layout *layout)
       i += strspn (fmt + i, "0123456789");
     }
 
-  length_modifier_offset = i;
-  has_L = (fmt[i] == 'L');
+  size_t length_modifier_offset = i;
+  bool has_L = (fmt[i] == 'L');
   i += has_L;
   if (fmt[i] == '\0')
-    die (EXIT_FAILURE, 0, _("format %s ends in %%"), quote (fmt));
+    error (EXIT_FAILURE, 0, _("format %s ends in %%"), quote (fmt));
   if (! strchr ("efgaEFGA", fmt[i]))
-    die (EXIT_FAILURE, 0,
-         _("format %s has unknown %%%c directive"), quote (fmt), fmt[i]);
+    error (EXIT_FAILURE, 0,
+           _("format %s has unknown %%%c directive"), quote (fmt), fmt[i]);
 
+  size_t suffix_len = 0;
   for (i++; ; i += (fmt[i] == '%') + 1)
     if (fmt[i] == '%' && fmt[i + 1] != '%')
-      die (EXIT_FAILURE, 0, _("format %s has too many %% directives"),
-           quote (fmt));
+      error (EXIT_FAILURE, 0, _("format %s has too many %% directives"),
+             quote (fmt));
     else if (fmt[i])
       suffix_len++;
     else
@@ -287,14 +308,6 @@ long_double_format (char const *fmt, struct layout *layout)
       }
 }
 
-static void ATTRIBUTE_NORETURN
-io_error (void)
-{
-  /* FIXME: consider option to silently ignore errno=EPIPE */
-  clearerr (stdout);
-  die (EXIT_FAILURE, errno, _("write error"));
-}
-
 /* Actually print the sequence of numbers in the specified range, with the
    given or default stepping and format.  */
 
@@ -307,17 +320,30 @@ print_numbers (char const *fmt, struct layout layout,
   if (! out_of_range)
     {
       long double x = first;
-      long double i;
 
-      for (i = 1; ; i++)
+      for (long double i = 1; ; i++)
         {
           long double x0 = x;
           if (printf (fmt, x) < 0)
-            io_error ();
+            write_error ();
           if (out_of_range)
             break;
+          if (i + 1 == i)
+            error (EXIT_FAILURE, EOVERFLOW, _("sequence counter exhausted"));
+
+          /* Mathematically equivalent to 'x += step;', and typically
+             less subject to rounding error.  */
           x = first + i * step;
-          out_of_range = (step < 0 ? x < last : last < x);
+
+          /* If STEP is too small to change X, then X might never pass LAST,
+             so compare the offsets from FIRST, which are not so rounded.  */
+          if (x == x0
+              && ! (step < 0
+                    ? last - first <= i * step : i * step <= last - first))
+            break;
+
+          /* Also treat NaN, from "seq -- -inf inf 0", as out of range.  */
+          out_of_range = ! (step < 0 ? last <= x : x <= last);
 
           if (out_of_range)
             {
@@ -329,19 +355,19 @@ print_numbers (char const *fmt, struct layout layout,
                  of stopping at 0.000002.  */
 
               bool print_extra_number = false;
-              long double x_val;
-              char *x_str;
-              int x_strlen;
               if (locale_ok)
                 setlocale (LC_NUMERIC, "C");
-              x_strlen = asprintf (&x_str, fmt, x);
+              char *x_str;
+              int x_strlen = asprintf (&x_str, fmt, x);
               if (locale_ok)
                 setlocale (LC_NUMERIC, "");
               if (x_strlen < 0)
                 xalloc_die ();
               x_str[x_strlen - layout.suffix_len] = '\0';
 
-              if (xstrtold (x_str + layout.prefix_len, NULL, &x_val, cl_strtold)
+              long double x_val;
+              if (xstrtold (x_str + layout.prefix_len, NULL,
+                            &x_val, cl_strtold)
                   && x_val == last)
                 {
                   char *x0_str = NULL;
@@ -349,7 +375,7 @@ print_numbers (char const *fmt, struct layout layout,
                   if (x0_strlen < 0)
                     xalloc_die ();
                   x0_str[x0_strlen - layout.suffix_len] = '\0';
-                  print_extra_number = !STREQ (x0_str, x_str);
+                  print_extra_number = !streq (x0_str, x_str);
                   free (x0_str);
                 }
 
@@ -359,11 +385,11 @@ print_numbers (char const *fmt, struct layout layout,
             }
 
           if (fputs (separator, stdout) == EOF)
-            io_error ();
+            write_error ();
         }
 
       if (fputs (terminator, stdout) == EOF)
-        io_error ();
+        write_error ();
     }
 }
 
@@ -407,41 +433,42 @@ get_default_format (operand first, operand step, operand last)
   return "%Lg";
 }
 
-/* The NUL-terminated string S0 of length S_LEN represents a valid
-   non-negative decimal integer.  Adjust the string and length so
-   that the pair describe the next-larger value.  */
-static void
-incr (char **s0, size_t *s_len)
+/* The nonempty char array P represents a valid non-negative decimal integer.
+   ENDP points just after the last char in P.
+   Adjust the array to describe the next-larger integer and return
+   whether this grows the array by one on the left.  */
+static bool
+incr_grows (char *p, char *endp)
 {
-  char *s = *s0;
-  char *endp = s + *s_len - 1;
-
   do
     {
-      if ((*endp)++ < '9')
-        return;
-      *endp-- = '0';
+      endp--;
+      if (*endp < '9')
+        {
+          (*endp)++;
+          return false;
+        }
+      *endp = '0';
     }
-  while (endp >= s);
-  *--(*s0) = '1';
-  ++*s_len;
+  while (p < endp);
+
+  p[-1] = '1';
+  return true;
 }
 
-/* Compare A and B (each a NUL-terminated digit string), with lengths
-   given by A_LEN and B_LEN.  Return +1 if A < B, -1 if B < A, else 0.  */
+/* Compare A and B with lengths A_LEN and B_LEN.  A and B are integers
+   represented by nonempty arrays of digits without redundant leading '0'.
+   Return negative if A < B, 0 if A = B, positive if A > B.  */
 static int
-cmp (char const *a, size_t a_len, char const *b, size_t b_len)
+cmp (char const *a, idx_t a_len, char const *b, idx_t b_len)
 {
-  if (a_len < b_len)
-    return -1;
-  if (b_len < a_len)
-    return 1;
-  return (memcmp (a, b, a_len));
+  return a_len == b_len ? memcmp (a, b, a_len) : _GL_CMP (a_len, b_len);
 }
 
 /* Trim leading 0's from S, but if S is all 0's, leave one.
    Return a pointer to the trimmed string.  */
-static char const * _GL_ATTRIBUTE_PURE
+ATTRIBUTE_PURE
+static char const *
 trim_leading_zeros (char const *s)
 {
   char const *p = s;
@@ -455,146 +482,121 @@ trim_leading_zeros (char const *s)
 }
 
 /* Print all whole numbers from A to B, inclusive -- to stdout, each
-   followed by a newline.  If B < A, return false and print nothing.
-   Otherwise, return true.  */
-static bool
+   followed by a newline.  Then exit.  */
+static void
 seq_fast (char const *a, char const *b, uintmax_t step)
 {
-  bool inf = STREQ (b, "inf");
-
-  /* Skip past any leading 0's.  Without this, our naive cmp
+  /* Skip past any redundant leading '0's.  Without this, our naive cmp
      function would declare 000 to be larger than 99.  */
   a = trim_leading_zeros (a);
   b = trim_leading_zeros (b);
 
-  size_t p_len = strlen (a);
-  size_t q_len = inf ? 0 : strlen (b);
+  idx_t p_len = strlen (a);
+  idx_t b_len = strlen (b);
+  bool inf = b_len == 3 && memeq (b, "inf", 4);
 
   /* Allow for at least 31 digits without realloc.
      1 more than p_len is needed for the inf case.  */
-#define INITIAL_ALLOC_DIGITS 31
-  size_t inc_size = MAX (MAX (p_len + 1, q_len), INITIAL_ALLOC_DIGITS);
+  enum { INITIAL_ALLOC_DIGITS = 31 };
+  idx_t inc_size = MAX (MAX (p_len + 1, b_len), INITIAL_ALLOC_DIGITS);
   /* Ensure we only increase by at most 1 digit at buffer boundaries.  */
-  verify (SEQ_FAST_STEP_LIMIT_DIGITS < INITIAL_ALLOC_DIGITS - 1);
+  static_assert (SEQ_FAST_STEP_LIMIT_DIGITS < INITIAL_ALLOC_DIGITS - 1);
 
-  /* Copy input strings (incl NUL) to end of new buffers.  */
-  char *p0 = xmalloc (inc_size + 1);
-  char *p = memcpy (p0 + inc_size - p_len, a, p_len + 1);
-  char *q;
-  char *q0;
-  if (! inf)
+  /* Copy A (sans NUL) to end of new buffer.  */
+  char *p0 = xmalloc (inc_size);
+  char *endp = p0 + inc_size;
+  char *p = memcpy (endp - p_len, a, p_len);
+
+  /* Reduce number of write calls which is seen to
+     give a speed-up of more than 2x over naive stdio code
+     when printing the first 10^9 integers.  */
+  char buf[BUFSIZ];
+  char *buf_end = buf + sizeof buf;
+  char *bufp = buf;
+
+  while (inf || cmp (p, endp - p, b, b_len) <= 0)
     {
-      q0 = xmalloc (inc_size + 1);
-      q = memcpy (q0 + inc_size - q_len, b, q_len + 1);
-    }
-  else
-    q = q0 = NULL;
-
-  bool ok = inf || cmp (p, p_len, q, q_len) <= 0;
-  if (ok)
-    {
-      /* Reduce number of fwrite calls which is seen to
-         give a speed-up of more than 2x over the unbuffered code
-         when printing the first 10^9 integers.  */
-      size_t buf_size = MAX (BUFSIZ, (inc_size + 1) * 2);
-      char *buf = xmalloc (buf_size);
-      char const *buf_end = buf + buf_size;
-
-      char *bufp = buf;
-
-      /* Write first number to buffer.  */
-      bufp = mempcpy (bufp, p, p_len);
-
-      /* Append separator then number.  */
-      while (true)
+      /* Append number, flushing output buffer while the number's
+         digits do not fit with room for a separator or terminator.  */
+      char *pp = p;
+      while (buf_end - bufp <= endp - pp)
         {
-          for (uintmax_t n_incr = step; n_incr; n_incr--)
-            incr (&p, &p_len);
-
-          if (! inf && 0 < cmp (p, p_len, q, q_len))
-            break;
-
-          *bufp++ = *separator;
-
-          /* Double up the buffers when needed for the inf case.  */
-          if (p_len == inc_size)
-            {
-              inc_size *= 2;
-              p0 = xrealloc (p0, inc_size + 1);
-              p = memmove (p0 + p_len, p0, p_len + 1);
-
-              if (buf_size < (inc_size + 1) * 2)
-                {
-                  size_t buf_offset = bufp - buf;
-                  buf_size = (inc_size + 1) * 2;
-                  buf = xrealloc (buf, buf_size);
-                  buf_end = buf + buf_size;
-                  bufp = buf + buf_offset;
-                }
-            }
-
-          bufp = mempcpy (bufp, p, p_len);
-          /* If no place for another separator + number then
-             output buffer so far, and reset to start of buffer.  */
-          if (buf_end - (p_len + 1) < bufp)
-            {
-              if (fwrite (buf, bufp - buf, 1, stdout) != 1)
-                io_error ();
-              bufp = buf;
-            }
+          memcpy (bufp, pp, buf_end - bufp);
+          pp += buf_end - bufp;
+          if (full_write (STDOUT_FILENO, buf, sizeof buf) != sizeof buf)
+            write_error ();
+          bufp = buf;
         }
 
-      /* Write any remaining buffered output, and the terminator.  */
-      *bufp++ = *terminator;
-      if (fwrite (buf, bufp - buf, 1, stdout) != 1)
-        io_error ();
+      /* The rest of the number, followed by a separator or terminator,
+         will fit.  Tentatively append a separator.  */
+      bufp = mempcpy (bufp, pp, endp - pp);
+      *bufp++ = *separator;
 
-      IF_LINT (free (buf));
+      /* Grow number buffer if needed for the inf case.  */
+      if (p == p0)
+        {
+          char *new_p0 = xpalloc (NULL, &inc_size, 1, -1, 1);
+          idx_t saved_p_len = endp - p;
+          endp = new_p0 + inc_size;
+          p = memcpy (endp - saved_p_len, p0, saved_p_len);
+          free (p0);
+          p0 = new_p0;
+        }
+
+      /* Compute next number.  */
+      for (uintmax_t n_incr = step; n_incr; n_incr--)
+        p -= incr_grows (p, endp);
     }
 
-  free (p0);
-  free (q0);
-  return ok;
+  /* Write the remaining buffered output with a terminator instead of
+     a separator.  */
+  idx_t remaining = bufp - buf;
+  if (remaining)
+    {
+      bufp[-1] = *terminator;
+      if (full_write (STDOUT_FILENO, buf, remaining) != remaining)
+        write_error ();
+    }
+
+  exit (EXIT_SUCCESS);
 }
 
 /* Return true if S consists of at least one digit and no non-digits.  */
-static bool _GL_ATTRIBUTE_PURE
+ATTRIBUTE_PURE
+static bool
 all_digits_p (char const *s)
 {
   size_t n = strlen (s);
-  return ISDIGIT (s[0]) && n == strspn (s, "0123456789");
+  return c_isdigit (s[0]) && n == strspn (s, "0123456789");
 }
 
 int
 main (int argc, char **argv)
 {
-  int optc;
-  operand first = { 1, 1, 0 };
-  operand step = { 1, 1, 0 };
-  operand last;
-  struct layout layout = { 0, 0 };
-
   /* The printf(3) format used for output.  */
   char const *format_str = NULL;
 
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   locale_ok = !!setlocale (LC_ALL, "");
+  locale_point = localeconv ()->decimal_point;
+  if (! *locale_point)
+    locale_point = ".";
   bindtextdomain (PACKAGE, LOCALEDIR);
   textdomain (PACKAGE);
 
   atexit (close_stdout);
-
-  equal_width = false;
-  separator = "\n";
 
   /* We have to handle negative numbers in the command line but this
      conflicts with the command line arguments.  So explicitly check first
      whether the next argument looks like a negative number.  */
   while (optind < argc)
     {
+      int optc;
       if (argv[optind][0] == '-'
-          && ((optc = argv[optind][1]) == '.' || ISDIGIT (optc)))
+          && ((optc = argv[optind][1]) == '.' || c_isdigit (optc)
+              || STRPREFIX (&argv[optind][1], locale_point)))
         {
           /* means negative number */
           break;
@@ -627,7 +629,7 @@ main (int argc, char **argv)
         }
     }
 
-  unsigned int n_args = argc - optind;
+  int n_args = argc - optind;
   if (n_args < 1)
     {
       error (0, 0, _("missing operand"));
@@ -640,6 +642,7 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
+  struct layout layout = { 0, 0 };
   if (format_str)
     format_str = long_double_format (format_str, &layout);
 
@@ -650,6 +653,8 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
+  char const *user_start = n_args == 1 ? "1" : argv[optind];
+
   /* If the following hold:
      - no format string, [FIXME: relax this, eventually]
      - integer start (or no start)
@@ -657,6 +662,7 @@ main (int argc, char **argv)
      - integer increment <= SEQ_FAST_STEP_LIMIT
      then use the much more efficient integer-only code,
      operating on arbitrarily large numbers.  */
+  operand step = { 1, 1, 0 };
   bool fast_step_ok = false;
   if (n_args != 3
       || (all_digits_p (argv[optind + 1])
@@ -670,15 +676,13 @@ main (int argc, char **argv)
                          && all_digits_p (argv[optind + 2])))
       && !equal_width && !format_str && strlen (separator) == 1)
     {
-      char const *s1 = n_args == 1 ? "1" : argv[optind];
+      char const *s1 = user_start;
       char const *s2 = argv[optind + (n_args - 1)];
-      if (seq_fast (s1, s2, step.value))
-        return EXIT_SUCCESS;
-
-      /* Upon any failure, let the more general code deal with it.  */
+      seq_fast (s1, s2, step.value);
     }
 
-  last = scan_arg (argv[optind++]);
+  operand first = { 1, 1, 0 };
+  operand last = scan_arg (argv[optind++]);
 
   if (optind < argc)
     {
@@ -691,7 +695,7 @@ main (int argc, char **argv)
           if (step.value == 0)
             {
               error (0, 0, _("invalid Zero increment value: %s"),
-                     quote (argv[optind-1]));
+                     quote (argv[optind - 1]));
               usage (EXIT_FAILURE);
             }
 
@@ -706,21 +710,14 @@ main (int argc, char **argv)
       && 0 < step.value && step.value <= SEQ_FAST_STEP_LIMIT
       && !equal_width && !format_str && strlen (separator) == 1)
     {
-      char *s1;
-      char *s2;
-      if (asprintf (&s1, "%0.Lf", first.value) < 0)
-        xalloc_die ();
-      if (! isfinite (last.value))
-        s2 = xstrdup ("inf"); /* Ensure "inf" is used.  */
-      else if (asprintf (&s2, "%0.Lf", last.value) < 0)
-        xalloc_die ();
+      char *s1 = (all_digits_p (user_start)
+                  ? xstrdup (user_start) : xasprintf ("%0.Lf", first.value));
+      /* Ensure "inf" is used.  */
+      char *s2 = (! isfinite (last.value)
+                  ? xstrdup ("inf") : xasprintf ("%0.Lf", last.value));
 
-      if (*s1 != '-' && *s2 != '-' && seq_fast (s1, s2, step.value))
-        {
-          IF_LINT (free (s1));
-          IF_LINT (free (s2));
-          return EXIT_SUCCESS;
-        }
+      if (*s1 != '-' && *s2 != '-')
+        seq_fast (s1, s2, step.value);
 
       free (s1);
       free (s2);
@@ -732,5 +729,5 @@ main (int argc, char **argv)
 
   print_numbers (format_str, layout, first.value, step.value, last.value);
 
-  return EXIT_SUCCESS;
+  main_exit (EXIT_SUCCESS);
 }

@@ -1,5 +1,5 @@
 /* tee - read from standard input and write to standard output and files.
-   Copyright (C) 1985-2021 Free Software Foundation, Inc.
+   Copyright (C) 1985-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,11 +23,11 @@
 
 #include "system.h"
 #include "argmatch.h"
-#include "die.h"
-#include "error.h"
 #include "fadvise.h"
-#include "stdio--.h"
+#include "fcntl--.h"
+#include "iopoll.h"
 #include "xbinary-io.h"
+#include "iopoll.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "tee"
@@ -37,7 +37,7 @@
   proper_name ("Richard M. Stallman"), \
   proper_name ("David MacKenzie")
 
-static bool tee_files (int nfiles, char **files);
+static bool tee_files (int nfiles, char **files, bool);
 
 /* If true, append to output files rather than truncating them. */
 static bool append;
@@ -88,23 +88,34 @@ usage (int status)
       fputs (_("\
 Copy standard input to each FILE, and also to standard output.\n\
 \n\
-  -a, --append              append to the given FILEs, do not overwrite\n\
-  -i, --ignore-interrupts   ignore interrupt signals\n\
 "), stdout);
-      fputs (_("\
-  -p                        diagnose errors writing to non pipes\n\
-      --output-error[=MODE]   set behavior on write error.  See MODE below\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -a, --append\n\
+         append to the given FILEs, do not overwrite\n\
+"));
+      oputs (_("\
+  -i, --ignore-interrupts\n\
+         ignore interrupt signals\n\
+"));
+      oputs (_("\
+  -p\n\
+         operate in a more appropriate MODE with pipes\n\
+"));
+      oputs (_("\
+      --output-error[=MODE]\n\
+         set behavior on write error.  See MODE below\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
 MODE determines behavior with write errors on the outputs:\n\
-  'warn'         diagnose errors writing to any output\n\
-  'warn-nopipe'  diagnose errors writing to any output not a pipe\n\
-  'exit'         exit on error writing to any output\n\
-  'exit-nopipe'  exit on error writing to any output not a pipe\n\
+  warn           diagnose errors writing to any output\n\
+  warn-nopipe    diagnose errors writing to any output not a pipe\n\
+  exit           exit on error writing to any output\n\
+  exit-nopipe    exit on error writing to any output not a pipe\n\
 The default MODE for the -p option is 'warn-nopipe'.\n\
+With \"nopipe\" MODEs, exit immediately if all outputs become broken pipes.\n\
 The default operation when --output-error is not specified, is to\n\
 exit immediately on error writing to a pipe, and diagnose errors\n\
 writing to non pipe outputs.\n\
@@ -117,9 +128,6 @@ writing to non pipe outputs.\n\
 int
 main (int argc, char **argv)
 {
-  bool ok;
-  int optc;
-
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   setlocale (LC_ALL, "");
@@ -128,9 +136,7 @@ main (int argc, char **argv)
 
   atexit (close_stdout);
 
-  append = false;
-  ignore_interrupts = false;
-
+  int optc;
   while ((optc = getopt_long (argc, argv, "aip", long_options, NULL)) != -1)
     {
       switch (optc)
@@ -166,33 +172,72 @@ main (int argc, char **argv)
   if (output_error != output_error_sigpipe)
     signal (SIGPIPE, SIG_IGN);
 
+  /* Whether to detect and close a broken pipe output.
+     There is no need if the input is always ready for reading.  */
+  bool pipe_check = ((output_error == output_error_warn_nopipe
+                      || output_error == output_error_exit_nopipe)
+                     && iopoll_input_ok (STDIN_FILENO));
+
   /* Do *not* warn if tee is given no file arguments.
      POSIX requires that it work when given no arguments.  */
 
-  ok = tee_files (argc - optind, &argv[optind]);
+  bool ok = tee_files (argc - optind, &argv[optind], pipe_check);
   if (close (STDIN_FILENO) != 0)
-    die (EXIT_FAILURE, errno, "%s", _("standard input"));
+    error (EXIT_FAILURE, errno, "%s", _("standard input"));
 
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
+
+
+/* Return the index of the first non-null descriptor after idx,
+   or -1 if all are null.  */
+
+ATTRIBUTE_PURE
+static int
+get_next_out (int *descriptors, int nfiles, int idx)
+{
+  for (idx++; idx <= nfiles; idx++)
+    if (0 <= descriptors[idx])
+      return idx;
+  return -1;  /* no outputs remaining */
+}
+
+/* Remove descriptors[i] due to write failure or broken pipe.
+   Return true if this indicates a reportable error.  */
+
+static bool
+fail_output (int *descriptors, char **files, int i)
+{
+  int w_errno = errno;
+  bool fail = errno != EPIPE
+              || output_error == output_error_exit
+              || output_error == output_error_warn;
+  if (fail)
+    {
+      error (output_error == output_error_exit
+             || output_error == output_error_exit_nopipe,
+             w_errno, "%s", quotef (files[i]));
+    }
+  descriptors[i] = -1;
+  return fail;
+}
+
 
 /* Copy the standard input into each of the NFILES files in FILES
    and into the standard output.  As a side effect, modify FILES[-1].
    Return true if successful.  */
 
 static bool
-tee_files (int nfiles, char **files)
+tee_files (int nfiles, char **files, bool pipe_check)
 {
   size_t n_outputs = 0;
-  FILE **descriptors;
+  int *descriptors;
+  bool *out_pollable IF_LINT ( = NULL);
   char buffer[BUFSIZ];
   ssize_t bytes_read = 0;
-  int i;
+  int first_out = 0;  /* idx of first non-null output in descriptors */
   bool ok = true;
-  char const *mode_string =
-    (O_BINARY
-     ? (append ? "ab" : "wb")
-     : (append ? "a" : "w"));
+  int flags = O_WRONLY | O_CREAT | O_BINARY | (append ? O_APPEND : O_TRUNC);
 
   xset_binary_mode (STDIN_FILENO, O_BINARY);
   xset_binary_mode (STDOUT_FILENO, O_BINARY);
@@ -202,18 +247,23 @@ tee_files (int nfiles, char **files)
      In both arrays, entry 0 corresponds to standard output.  */
 
   descriptors = xnmalloc (nfiles + 1, sizeof *descriptors);
+  if (pipe_check)
+    out_pollable = xnmalloc (nfiles + 1, sizeof *out_pollable);
   files--;
-  descriptors[0] = stdout;
+  descriptors[0] = STDOUT_FILENO;
+  if (pipe_check)
+    out_pollable[0] = iopoll_output_ok (descriptors[0]);
   files[0] = bad_cast (_("standard output"));
-  setvbuf (stdout, NULL, _IONBF, 0);
   n_outputs++;
 
-  for (i = 1; i <= nfiles; i++)
+  for (int i = 1; i <= nfiles; i++)
     {
       /* Do not treat "-" specially - as mandated by POSIX.  */
-      descriptors[i] = fopen (files[i], mode_string);
-      if (descriptors[i] == NULL)
+      descriptors[i] = open (files[i], flags, MODE_RW_UGO);
+      if (descriptors[i] < 0)
         {
+          if (pipe_check)
+            out_pollable[i] = false;
           error (output_error == output_error_exit
                  || output_error == output_error_exit_nopipe,
                  errno, "%s", quotef (files[i]));
@@ -221,13 +271,36 @@ tee_files (int nfiles, char **files)
         }
       else
         {
-          setvbuf (descriptors[i], NULL, _IONBF, 0);
+          if (pipe_check)
+            out_pollable[i] = iopoll_output_ok (descriptors[i]);
           n_outputs++;
         }
     }
 
   while (n_outputs)
     {
+      if (pipe_check && out_pollable[first_out])
+        {
+          /* Monitor for input, or errors on first valid output.  */
+          int err = iopoll (STDIN_FILENO, descriptors[first_out], true);
+
+          /* Close the output if it became a broken pipe.  */
+          if (err == IOPOLL_BROKEN_OUTPUT)
+            {
+              errno = EPIPE;  /* behave like write produced EPIPE */
+              if (fail_output (descriptors, files, first_out))
+                ok = false;
+              n_outputs--;
+              first_out = get_next_out (descriptors, nfiles, first_out);
+              continue;
+            }
+          else if (err == IOPOLL_ERROR)
+            {
+              error (0, errno, _("iopoll error"));
+              ok = false;
+            }
+        }
+
       bytes_read = read (STDIN_FILENO, buffer, sizeof buffer);
       if (bytes_read < 0 && errno == EINTR)
         continue;
@@ -236,25 +309,15 @@ tee_files (int nfiles, char **files)
 
       /* Write to all NFILES + 1 descriptors.
          Standard output is the first one.  */
-      for (i = 0; i <= nfiles; i++)
-        if (descriptors[i]
-            && fwrite (buffer, bytes_read, 1, descriptors[i]) != 1)
+      for (int i = 0; i <= nfiles; i++)
+        if (0 <= descriptors[i]
+            && ! write_wait (descriptors[i], buffer, bytes_read))
           {
-            int w_errno = errno;
-            bool fail = errno != EPIPE || (output_error == output_error_exit
-                                          || output_error == output_error_warn);
-            if (descriptors[i] == stdout)
-              clearerr (stdout); /* Avoid redundant close_stdout diagnostic.  */
-            if (fail)
-              {
-                error (output_error == output_error_exit
-                       || output_error == output_error_exit_nopipe,
-                       w_errno, "%s", quotef (files[i]));
-              }
-            descriptors[i] = NULL;
-            if (fail)
+            if (fail_output (descriptors, files, i))
               ok = false;
             n_outputs--;
+            if (i == first_out)
+              first_out = get_next_out (descriptors, nfiles, first_out);
           }
     }
 
@@ -265,14 +328,16 @@ tee_files (int nfiles, char **files)
     }
 
   /* Close the files, but not standard output.  */
-  for (i = 1; i <= nfiles; i++)
-    if (descriptors[i] && fclose (descriptors[i]) != 0)
+  for (int i = 1; i <= nfiles; i++)
+    if (0 <= descriptors[i] && close (descriptors[i]) < 0)
       {
         error (0, errno, "%s", quotef (files[i]));
         ok = false;
       }
 
   free (descriptors);
+  if (pipe_check)
+    free (out_pollable);
 
   return ok;
 }

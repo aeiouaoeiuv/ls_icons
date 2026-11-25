@@ -1,5 +1,5 @@
 /* system-dependent definitions for coreutils
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -16,16 +16,16 @@
 
 /* Include this file _after_ system headers if possible.  */
 
+#include <attribute.h>
+
 #include <alloca.h>
+
+#include <ctype.h>
 
 #include <sys/stat.h>
 
 /* Commonly used file permission combination.  */
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
-
-#if !defined HAVE_MKFIFO
-# define mkfifo(name, mode) mknod (name, (mode) | S_IFIFO, 0)
-#endif
 
 #if HAVE_SYS_PARAM_H
 # include <sys/param.h>
@@ -69,7 +69,11 @@
 # define makedev(maj, min)  mkdev (maj, min)
 #endif
 
+#include <stdckdint.h>
+#include <stdcountof.h>
+#include <stddef.h>
 #include <string.h>
+#include <uchar.h>
 #include <errno.h>
 
 /* Some systems don't define this; POSIX mentions it but says it is
@@ -79,7 +83,11 @@
 # define ENODATA (-1)
 #endif
 
-#include <stdbool.h>
+/* Return true if ERRNUM indicates that a file disappeared during a
+   directory traversal.  */
+static inline bool
+ignorable_traversal_errno (int errnum) { return errnum == ENOENT; }
+
 #include <stdlib.h>
 #include "version.h"
 
@@ -103,6 +111,11 @@ initialize_exit_failure (int status)
 }
 
 #include <fcntl.h>
+#ifdef O_PATH
+enum { O_PATHSEARCH = O_PATH };
+#else
+enum { O_PATHSEARCH = O_SEARCH };
+#endif
 
 #include <dirent.h>
 #ifndef _D_EXACT_NAMLEN
@@ -139,27 +152,48 @@ enum
 
 #include "timespec.h"
 
-#include <ctype.h>
-
-/* ISDIGIT differs from isdigit, as follows:
-   - Its arg may be any int or unsigned int; it need not be an unsigned char
-     or EOF.
-   - It's typically faster.
-   POSIX says that only '0' through '9' are digits.  Prefer ISDIGIT to
-   isdigit unless it's important to use the locale's definition
-   of 'digit' even when the host does not conform to POSIX.  */
-#define ISDIGIT(c) ((unsigned int) (c) - '0' <= 9)
-
 /* Convert a possibly-signed character to an unsigned character.  This is
    a bit safer than casting to unsigned char, since it catches some type
    errors that the cast doesn't.  */
 static inline unsigned char to_uchar (char ch) { return ch; }
 
-/* '\n' is considered a field separator with  --zero-terminated.  */
-static inline bool
-field_sep (unsigned char ch)
+/* Return non zero if a non breaking space.  */
+ATTRIBUTE_PURE
+static inline int
+c32isnbspace (char32_t wc)
 {
-  return isblank (ch) || ch == '\n';
+  return wc == 0x00A0 || wc == 0x2007 || wc == 0x202F || wc == 0x2060;
+}
+
+ATTRIBUTE_PURE
+static inline int
+c32isnewline (char32_t wc)
+{
+  return wc == 0x000A || wc == 0x0085 || wc == 0x2028 || wc == 0x2029;
+}
+
+ATTRIBUTE_PURE
+static inline int
+c32isvertspace (char32_t wc)
+{
+  /* 000D is backwards as opposed to vertical,
+     but that's fine for this grouping.  */
+  return c32isnewline (wc) || wc == 0x000B || wc == 0x000C || wc == 0x000D;
+}
+
+/* c32isblank() is too variable on non GLIBC platforms.
+   E.g., does not include \u3000 ideographic space on musl.
+   E.g., does include non-breaking space on Solaris and NetBSD.
+   This equivalent is more consistent across systems.  */
+ATTRIBUTE_PURE
+static inline bool
+c32issep (char32_t wc)
+{
+#if defined __GLIBC__
+  return !! c32isblank (wc);
+#else
+  return c32isspace (wc) && ! c32isvertspace (wc) && ! c32isnbspace (wc);
+#endif
 }
 
 #include <locale.h>
@@ -188,8 +222,7 @@ select_plural (uintmax_t n)
   return (n <= ULONG_MAX ? n : n % PLURAL_REDUCER + PLURAL_REDUCER);
 }
 
-#define STREQ(a, b) (strcmp (a, b) == 0)
-#define STREQ_LEN(a, b, n) (strncmp (a, b, n) == 0)
+#define STREQ_LEN(a, b, n) (strncmp (a, b, n) == 0) /* n==-1 means unbounded */
 #define STRPREFIX(a, b) (strncmp (a, b, strlen (b)) == 0)
 
 /* Just like strncmp, but the second argument must be a literal string
@@ -238,23 +271,9 @@ struct group *getgrgid (gid_t);
 uid_t getuid (void);
 #endif
 
+#include "idx.h"
 #include "xalloc.h"
 #include "verify.h"
-
-/* This is simply a shorthand for the common case in which
-   the third argument to x2nrealloc would be 'sizeof *(P)'.
-   Ensure that sizeof *(P) is *not* 1.  In that case, it'd be
-   better to use X2REALLOC, although not strictly necessary.  */
-#define X2NREALLOC(P, PN) verify_expr (sizeof *(P) != 1, \
-                                       x2nrealloc (P, PN, sizeof *(P)))
-
-/* Using x2realloc (when appropriate) usually makes your code more
-   readable than using x2nrealloc, but it also makes it so your
-   code will malfunction if sizeof *(P) ever becomes 2 or greater.
-   So use this macro instead of using x2realloc directly.  */
-#define X2REALLOC(P, PN) verify_expr (sizeof *(P) == 1, \
-                                      x2realloc (P, PN))
-
 #include "unlocked-io.h"
 #include "same-inode.h"
 
@@ -285,37 +304,41 @@ readdir_ignoring_dot_and_dotdot (DIR *dirp)
     }
 }
 
-/* Return true if DIR is determined to be an empty directory.
-   Return false with ERRNO==0 if DIR is a non empty directory.
-   Return false if not able to determine if directory empty.  */
-static inline bool
-is_empty_dir (int fd_cwd, char const *dir)
+/* Return -1 if DIR is an empty directory,
+   0 if DIR is a nonempty directory,
+   and a positive error number if there was trouble determining
+   whether DIR is an empty or nonempty directory.  */
+enum {
+    DS_UNKNOWN = -2,
+    DS_EMPTY = -1,
+    DS_NONEMPTY = 0,
+};
+static inline int
+directory_status (int fd_cwd, char const *dir)
 {
   DIR *dirp;
-  struct dirent const *dp;
+  bool no_direntries;
   int saved_errno;
   int fd = openat (fd_cwd, dir,
                    (O_RDONLY | O_DIRECTORY
                     | O_NOCTTY | O_NOFOLLOW | O_NONBLOCK));
 
   if (fd < 0)
-    return false;
+    return errno;
 
   dirp = fdopendir (fd);
   if (dirp == NULL)
     {
+      saved_errno = errno;
       close (fd);
-      return false;
+      return saved_errno;
     }
 
   errno = 0;
-  dp = readdir_ignoring_dot_and_dotdot (dirp);
+  no_direntries = !readdir_ignoring_dot_and_dotdot (dirp);
   saved_errno = errno;
   closedir (dirp);
-  errno = saved_errno;
-  if (dp != NULL)
-    return false;
-  return saved_errno == 0 ? true : false;
+  return no_direntries && saved_errno == 0 ? DS_EMPTY : saved_errno;
 }
 
 /* Factor out some of the common --help and --version processing code.  */
@@ -345,29 +368,26 @@ enum
    Usually it is just PROGRAM_NAME.  */
 #define USAGE_BUILTIN_WARNING \
   _("\n" \
-"NOTE: your shell may have its own version of %s, which usually supersedes\n" \
+"Your shell may have its own version of %s, which usually supersedes\n" \
 "the version described here.  Please refer to your shell's documentation\n" \
 "for details about the options it supports.\n")
 
 #define HELP_OPTION_DESCRIPTION \
-  _("      --help     display this help and exit\n")
+  _("      --help\n         display this help and exit\n")
 #define VERSION_OPTION_DESCRIPTION \
-  _("      --version  output version information and exit\n")
+  _("      --version\n         output version information and exit\n")
 
 #include "closein.h"
 #include "closeout.h"
 
-#define emit_bug_reporting_address unused__emit_bug_reporting_address
 #include "version-etc.h"
-#undef emit_bug_reporting_address
 
 #include "propername.h"
-/* Define away proper_name (leaving proper_name_utf8, which affects far
-   fewer programs), since it's not worth the cost of adding ~17KB to
+/* Define away proper_name, since it's not worth the cost of adding ~17KB to
    the x86_64 text size of every single program.  This avoids a 40%
    (almost ~2MB) increase in the file system space utilization for the set
    of the 100 binaries. */
-#define proper_name(x) (x)
+#define proper_name(x) proper_name_lite (x, x)
 
 #include "progname.h"
 
@@ -378,14 +398,7 @@ enum
     exit (EXIT_SUCCESS);						\
     break;
 
-#ifndef MAX
-# define MAX(a, b) ((a) > (b) ? (a) : (b))
-#endif
-
-#ifndef MIN
-# define MIN(a,b) (((a) < (b)) ? (a) : (b))
-#endif
-
+#include "minmax.h"
 #include "intprops.h"
 
 #ifndef SSIZE_MAX
@@ -412,29 +425,23 @@ enum
 # define PID_T_MAX TYPE_MAXIMUM (pid_t)
 #endif
 
-/* Use this to suppress gcc's '...may be used before initialized' warnings. */
+/* Use this to suppress gcc warnings.  */
 #ifdef lint
 # define IF_LINT(Code) Code
 #else
 # define IF_LINT(Code) /* empty */
 #endif
 
-#ifndef __attribute__
-# if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 8)
-#  define __attribute__(x) /* empty */
-# endif
-#endif
-
-#ifndef ATTRIBUTE_NORETURN
-# define ATTRIBUTE_NORETURN __attribute__ ((__noreturn__))
-#endif
-
-/* The warn_unused_result attribute appeared first in gcc-3.4.0 */
-#undef ATTRIBUTE_WARN_UNUSED_RESULT
-#if __GNUC__ < 3 || (__GNUC__ == 3 && __GNUC_MINOR__ < 4)
-# define ATTRIBUTE_WARN_UNUSED_RESULT /* empty */
+/* main_exit should be called only from the main function.  It is
+   equivalent to 'exit'.  When checking for lint it calls 'exit', to
+   pacify gcc -fsanitize=lint which would otherwise have false alarms
+   for pointers in the main function's activation record.  Otherwise
+   it simply returns from 'main'; this used to be what gcc's static
+   checking preferred and may yet be again.  */
+#ifdef lint
+# define main_exit(status) exit (status)
 #else
-# define ATTRIBUTE_WARN_UNUSED_RESULT __attribute__ ((__warn_unused_result__))
+# define main_exit(status) return status
 #endif
 
 #ifdef __GNUC__
@@ -468,7 +475,8 @@ enum
 /* Compute the greatest common divisor of U and V using Euclid's
    algorithm.  U and V must be nonzero.  */
 
-static inline size_t _GL_ATTRIBUTE_CONST
+ATTRIBUTE_CONST
+static inline size_t
 gcd (size_t u, size_t v)
 {
   do
@@ -486,7 +494,8 @@ gcd (size_t u, size_t v)
    nonzero.  There is no overflow checking, so callers should not
    specify outlandish sizes.  */
 
-static inline size_t _GL_ATTRIBUTE_CONST
+ATTRIBUTE_CONST
+static inline size_t
 lcm (size_t u, size_t v)
 {
   return u * (v / gcd (u, v));
@@ -497,6 +506,7 @@ lcm (size_t u, size_t v)
    PTR) through ((char *) PTR + ALIGNMENT - 1) to be addressable
    locations.  */
 
+ATTRIBUTE_ACCESS_NONE ((1))
 static inline void *
 ptr_align (void const *ptr, size_t alignment)
 {
@@ -508,7 +518,8 @@ ptr_align (void const *ptr, size_t alignment)
 /* Return whether the buffer consists entirely of NULs.
    Based on memeqzero in CCAN by Rusty Russell under CC0 (Public domain).  */
 
-static inline bool _GL_ATTRIBUTE_PURE
+ATTRIBUTE_PURE
+static inline bool
 is_nul (void const *buf, size_t length)
 {
   const unsigned char *p = buf;
@@ -525,7 +536,7 @@ is_nul (void const *buf, size_t length)
 #endif
 
   if (! length)
-      return true;
+    return true;
 
   /* Check len bytes not aligned on a word.  */
   while (UNLIKELY (length & (sizeof word - 1)))
@@ -552,30 +563,182 @@ is_nul (void const *buf, size_t length)
         break;
    }
 
-   /* Now we know first 16 bytes are NUL, memcmp with self.  */
-   return memcmp (buf, p, length) == 0;
+  /* Now we know first 16 bytes are NUL, memeq with self.  */
+  return memeq (buf, p, length);
 }
 
-/* If 10*Accum + Digit_val is larger than the maximum value for Type,
-   then don't update Accum and return false to indicate it would
-   overflow.  Otherwise, set Accum to that new value and return true.
-   Verify at compile-time that Type is Accum's type, and that Type is
-   unsigned.  Accum must be an object, so that we can take its
-   address.  Accum and Digit_val may be evaluated multiple times.
+/* Set Accum = 10*Accum + Digit_val and return true, where Accum is an
+   integer object and Digit_val an integer expression.  However, if
+   the result overflows, set Accum to an unspecified value and return
+   false.  Accum and Digit_val may be evaluated multiple times.  */
 
-   The "Added check" below is not strictly required, but it causes GCC
-   to return a nonzero exit status instead of merely a warning
-   diagnostic, and that is more useful.  */
+#define DECIMAL_DIGIT_ACCUMULATE(Accum, Digit_val)			\
+  (!ckd_mul (&(Accum), Accum, 10) && !ckd_add (&(Accum), Accum, Digit_val))
 
-#define DECIMAL_DIGIT_ACCUMULATE(Accum, Digit_val, Type)		\
-  (									\
-   (void) (&(Accum) == (Type *) NULL),  /* The type matches.  */	\
-   verify_expr (! TYPE_SIGNED (Type), /* The type is unsigned.  */      \
-                (((Type) -1 / 10 < (Accum)                              \
-                  || (Type) ((Accum) * 10 + (Digit_val)) < (Accum))     \
-                 ? false                                                \
-                 : (((Accum) = (Accum) * 10 + (Digit_val)), true)))     \
-  )
+
+/* Output --option descriptions;
+   formatted with ANSI format and hyperlink codes.
+   Any postprocessors like help2man etc. are expected to handle this,
+   though it can be disabled in edge cases with the TERM=dumb env var.  */
+
+#define oputs(option) oputs_ (PROGRAM_NAME, option)
+static inline void
+oputs_ (MAYBE_UNUSED char const *program, char const *option)
+{
+  static int help_markup =
+#if defined MANUAL_URL || defined BOLD_MAN_REFS
+    -1;  /* Lookup.  */
+#else
+    0;   /* Disable.  */
+#endif
+  if (help_markup == -1)
+    {
+      /* Note one generally would want markup when piping to grep/less etc.
+         but we're conservative here for now, and only markup to tty.  */
+      char const *te;
+      help_markup = (isatty (STDOUT_FILENO)
+                     ? ((te = getenv ("TERM")) && *te && !streq (te, "dumb"))
+                     : getenv ("IN_HELP2MAN") != NULL);
+    }
+  if (! help_markup)
+    {
+      fputs (option, stdout);
+      return;
+    }
+
+  bool double_space = true;
+  char const *first_word = option + strspn (option, " \t\n");
+  char const *option_text = strchr (option, '-');
+  if (!option_text)                    /* for dd(1) option syntax.  */
+    {
+      option_text = first_word;
+      /* Just match first word to support single spaced
+         translated dd "foo=bar description" format.  */
+      double_space = false;
+    }
+  else if (option_text != first_word)  /* for test(1) option syntax.  */
+    {
+      /* Ensure only a single space encountered before '-', to avoid
+         matching within descriptions for translated dd option syntax.  */
+      char const *s = first_word;
+      size_t spaces = 0;
+      while (s < option_text && spaces < 2)
+        spaces += !!isspace (to_uchar (*s++));
+      if (spaces == 2)
+        {
+          /* Probably mismatched dd format.  */
+          option_text = first_word;
+          double_space = false;
+        }
+    }
+
+  size_t anchor_len = strcspn (option_text, ",=[ \n");
+
+  /* Set highlighted text up to spacing after the full option text.
+     Any single space is included in highlighted text,
+     double space or TAB or newline terminates the option text.  */
+  char const *desc_text = option_text + anchor_len;
+  while (*desc_text && *desc_text != '\n')
+    {
+      if (*desc_text == '-' && *(desc_text + 1) == '-')
+        double_space = false;
+      if (isspace (to_uchar (*desc_text)))
+        {
+          if (*desc_text == '\t' || isspace (to_uchar (*(desc_text + 1))))
+            break;
+          /* With long options we restrict the match as some translations
+             delimit a long option and description with a single space.  */
+          if (!double_space && *(desc_text + 1) != '-')
+            break;
+        }
+
+      desc_text++;
+    }
+
+  /* write spaces before option text. */
+  fwrite (option, 1, first_word - option, stdout);
+
+  /* write option text.  */
+#ifdef MANUAL_URL
+  char const *url_program =   streq (program, "[") ? "test"
+                            : streq (program, "dir") ? "ls"
+                            : streq (program, "vdir") ? "ls"
+                            : streq (program, "b2sum") ? "cksum"
+                            : streq (program, "md5sum") ? "cksum"
+                            : streq (program, "sha1sum") ? "cksum"
+                            : streq (program, "sha224sum") ? "cksum"
+                            : streq (program, "sha256sum") ? "cksum"
+                            : streq (program, "sha384sum") ? "cksum"
+                            : streq (program, "sha512sum") ? "cksum"
+                            : program;
+  /* Note we don't add the hostname to the links below, because
+     it's unused with http:// links and not usually useful with file:// links.
+     Also there is the possibility that local (hostname agnostic) links
+     would work if remotely accessing a similar system to the local one.  */
+  if (STREQ_LEN (option_text, "--help", 6)
+      || STREQ_LEN (option_text, "--version", 9))
+    {
+      /* We don't have --help and --version links for each command,
+         and they wouldn't be useful to reference anyway.
+         Instead use these to reference the single node manual.  */
+      printf ("\033]8;;%s%s#%s%.*s", PACKAGE_URL,
+              url_program, url_program, (int) anchor_len, option_text);
+    }
+  else
+    {
+      /* The single node manual doesn't work for ls, cksum, md5sum, sha*sum,
+         so we link to the full manual.  */
+      printf ("\033]8;;%s#%s%.*s", MANUAL_URL, url_program,
+              (int) anchor_len, option_text);
+    }
+  fputs ("\033\\", stdout);
+#endif
+#ifdef BOLD_MAN_REFS
+  /* Note help2man strips this and will reinstate with --bold-refs.  */
+  fputs ("\033[1m", stdout);
+#endif
+  /* first_word != option_text for test(1).  */
+  fwrite (first_word, 1, desc_text - first_word, stdout);
+#ifdef BOLD_MAN_REFS
+  fputs ("\033[0m", stdout);
+#endif
+#ifdef MANUAL_URL
+  fputs ("\033]8;;\033\\", stdout);
+#endif
+
+  /* write description.  */
+  fputs (desc_text, stdout);
+}
+
+/* If required and possible,
+   call oputs with printf formatted message.  */
+
+#define oprintf(...) oprintf_ (PROGRAM_NAME, __VA_ARGS__)
+ATTRIBUTE_FORMAT ((printf, 2, 3))
+static inline void
+oprintf_ (char const *program, char const *message, ...)
+{
+  va_list args;
+  char *buf;
+  int buflen = -1;
+
+#if defined MANUAL_URL || defined BOLD_MAN_REFS
+  va_start (args, message);
+  buflen = vasprintf (&buf, message, args);
+  va_end (args);
+#endif
+
+  if (buflen < 0)
+    {
+      va_start (args, message);
+      vprintf (message, args);
+      va_end (args);
+      return;
+    }
+
+  oputs_ (program, buf);
+  free (buf);
+}
 
 static inline void
 emit_stdin_note (void)
@@ -597,7 +760,7 @@ emit_size_note (void)
 {
   fputs (_("\n\
 The SIZE argument is an integer and optional unit (example: 10K is 10*1024).\n\
-Units are K,M,G,T,P,E,Z,Y (powers of 1024) or KB,MB,... (powers of 1000).\n\
+Units are K,M,G,T,P,E,Z,Y,R,Q (powers of 1024) or KB,MB,... (powers of 1000).\n\
 Binary prefixes can be used, too: KiB=K, MiB=M, and so on.\n\
 "), stdout);
 }
@@ -610,6 +773,23 @@ Display values are in units of the first available SIZE from --block-size,\n\
 and the %s_BLOCK_SIZE, BLOCK_SIZE and BLOCKSIZE environment variables.\n\
 Otherwise, units default to 1024 bytes (or 512 if POSIXLY_CORRECT is set).\n\
 "), program);
+}
+
+static inline void
+emit_update_parameters_note (void)
+{
+  fputs (_("\
+\n\
+UPDATE controls which existing files in the destination are replaced.\n\
+'all' is the default operation when an --update option is not specified,\n\
+and results in all existing files in the destination being replaced.\n\
+'none' is like the --no-clobber option, in that no files in the\n\
+destination are replaced, and skipped files do not induce a failure.\n\
+'none-fail' also ensures no files are replaced in the destination,\n\
+but any skipped files are diagnosed and induce a failure.\n\
+'older' is the default operation when --update is specified, and results\n\
+in files being replaced if they're older than the corresponding source file.\n\
+"), stdout);
 }
 
 static inline void
@@ -630,6 +810,45 @@ the VERSION_CONTROL environment variable.  Here are the values:\n\
 "), stdout);
 }
 
+#define emit_symlink_recurse_options(default_opt) \
+ emit_symlink_recurse_options_ (PROGRAM_NAME, default_opt)
+static inline void
+emit_symlink_recurse_options_ (char const *program, char const *default_opt)
+{
+      printf (_("\
+\n\
+The following options modify how a hierarchy is traversed when the -R\n\
+option is also specified.  If more than one is specified, only the final\n\
+one takes effect. %s is the default.\n\
+\n\
+"), default_opt);
+      oputs_ (program, _("\
+  -H\n\
+         if a command line argument is a symlink to a directory, traverse it\n\
+"));
+      oputs_ (program, _("\
+  -L\n\
+         traverse every symbolic link to a directory encountered\n\
+"));
+      oputs_ (program, _("\
+  -P\n\
+         do not traverse any symbolic links\n\
+\n\
+"));
+}
+
+static inline void
+emit_exec_status (char const *program)
+{
+      printf (_("\n\
+Exit status:\n\
+  125  if the %s command itself fails\n\
+  126  if COMMAND is found but cannot be invoked\n\
+  127  if COMMAND cannot be found\n\
+  -    the exit status of COMMAND otherwise\n\
+"), program);
+}
+
 static inline void
 emit_ancillary_info (char const *program)
 {
@@ -646,28 +865,20 @@ emit_ancillary_info (char const *program)
   char const *node = program;
   struct infomap const *map_prog = infomap;
 
-  while (map_prog->program && ! STREQ (program, map_prog->program))
+  while (map_prog->program && ! streq (program, map_prog->program))
     map_prog++;
 
   if (map_prog->node)
     node = map_prog->node;
 
-  printf (_("\n%s online help: <%s>\n"), PACKAGE_NAME, PACKAGE_URL);
+  emit_bug_reporting_address ();
 
-  /* Don't output this redundant message for English locales.
-     Note we still output for 'C' so that it gets included in the man page.  */
-  char const *lc_messages = setlocale (LC_MESSAGES, NULL);
-  if (lc_messages && STRNCMP_LIT (lc_messages, "en_"))
-    {
-      /* TRANSLATORS: Replace LANG_CODE in this URL with your language code
-         <https://translationproject.org/team/LANG_CODE.html> to form one of
-         the URLs at https://translationproject.org/team/.  Otherwise, replace
-         the entire URL with your translation team's email address.  */
-      fputs (_("Report any translation bugs to "
-               "<https://translationproject.org/team/>\n"), stdout);
-    }
+  /* .htaccess on the coreutils web site maps programs to the appropriate page,
+     however we explicitly handle "[" -> "test" here as the "[" is not
+     recognized as part of a URL by default in terminals.  */
+  char const *url_program = streq (program, "[") ? "test" : program;
   printf (_("Full documentation <%s%s>\n"),
-          PACKAGE_URL, program);
+          PACKAGE_URL, url_program);
   printf (_("or available locally via: info '(coreutils) %s%s'\n"),
           node, node == program ? " invocation" : "");
 }
@@ -708,7 +919,9 @@ usable_st_size (struct stat const *sb)
           || S_TYPEISSHM (sb) || S_TYPEISTMO (sb));
 }
 
-void usage (int status) ATTRIBUTE_NORETURN;
+_Noreturn void usage (int status);
+
+#include <error.h>
 
 /* Like error(0, 0, ...), but without an implicit newline.
    Also a noop unless the global DEV_DEBUG is set.  */
@@ -732,6 +945,18 @@ The following directory is part of the cycle:\n  %s\n"), \
     }					\
   while (0)
 
+/* exit with a _single_ "write error" diagnostic.  */
+
+static inline void
+write_error (void)
+{
+  int saved_errno = errno;
+  fflush (stdout);    /* Last attempt to write any buffered data.  */
+  fpurge (stdout);    /* Ensure nothing buffered that might induce an error. */
+  clearerr (stdout);  /* Avoid extraneous diagnostic from close_stdout.  */
+  error (EXIT_FAILURE, saved_errno, _("write error"));
+}
+
 /* Like stpncpy, but do ensure that the result is NUL-terminated,
    and do not NUL-pad out to LEN.  I.e., when strnlen (src, len) == len,
    this function writes a NUL byte into dest[len].  Thus, the length
@@ -740,16 +965,11 @@ The following directory is part of the cycle:\n  %s\n"), \
 static inline char *
 stzncpy (char *restrict dest, char const *restrict src, size_t len)
 {
-  char const *src_end = src + len;
-  while (src < src_end && *src)
+  for (size_t i = 0; i < len && *src; i++)
     *dest++ = *src++;
   *dest = 0;
   return dest;
 }
-
-#ifndef ARRAY_CARDINALITY
-# define ARRAY_CARDINALITY(Array) (sizeof (Array) / sizeof *(Array))
-#endif
 
 /* Return true if ERR is ENOTSUP or EOPNOTSUPP, otherwise false.
    This wrapper function avoids the redundant 'or'd comparison on
@@ -780,10 +1000,64 @@ is_ENOTSUP (int err)
 #define quoteaf_n(n, arg) \
   quotearg_n_style (n, shell_escape_always_quoting_style, arg)
 
-#ifndef FALLTHROUGH
-# if __GNUC__ < 7
-#  define FALLTHROUGH ((void) 0)
-# else
-#  define FALLTHROUGH __attribute__ ((__fallthrough__))
-# endif
+/* Equivalent to quotearg(), but explicit to avoid syntax checks.  */
+#define quoteN(x) quotearg_style (get_quoting_style (NULL), x)
+#define quoteN_mem(x, size)                                     \
+  quotearg_style_mem (get_quoting_style (NULL), x, size)
+
+#ifdef ARGMATCH
+/* Return the quoting style specified by the environment variable
+   QUOTING_STYLE if set and valid, -1 otherwise.  */
+static inline int
+getenv_quoting_style (void)
+{
+  char const *q_style = getenv ("QUOTING_STYLE");
+  if (!q_style)
+    return -1;
+
+  int i = ARGMATCH (q_style, quoting_style_args, quoting_style_vals);
+  if (i < 0)
+    {
+      error (0, 0, _("ignoring invalid value of environment "
+                     "variable QUOTING_STYLE: %s"), quote (q_style));
+      return -1;
+    }
+  return quoting_style_vals[i];
+}
+
+/* Used instead of XARGMATCH() to provide a custom error message.  */
+static inline ptrdiff_t
+x_timestyle_match (char const * style, bool allow_posix,
+                   char const *const * timestyle_args,
+                   char const * timestyle_types,
+                   size_t timestyle_types_size,
+                   int fail_status)
+{
+  ptrdiff_t res = argmatch (style, timestyle_args,
+                            timestyle_types,
+                            timestyle_types_size);
+  if (res < 0)
+    {
+      /* This whole block used to be a simple use of XARGMATCH.
+         but that didn't print the "posix-"-prefixed variants or
+         the "+"-prefixed format string option upon failure.  */
+      argmatch_invalid ("time style", style, res);
+
+      /* The following is a manual expansion of argmatch_valid,
+         but with the added "+ ..." description and the [posix-]
+         prefixes prepended.  Note that this simplification works
+         only because all four existing time_style_types values
+         are distinct.  */
+      fputs (_("Valid arguments are:\n"), stderr);
+      char const *const *p = timestyle_args;
+      char const *posix_prefix = allow_posix ? "[posix-]" : "";
+      while (*p)
+        fprintf (stderr, "  - %s%s\n", posix_prefix, *p++);
+      fputs (_("  - +FORMAT (e.g., +%H:%M) for a 'date'-style"
+               " format\n"), stderr);
+      usage (fail_status);
+    }
+
+  return res;
+}
 #endif

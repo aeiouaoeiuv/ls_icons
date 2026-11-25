@@ -1,5 +1,5 @@
 /* nl -- number lines of files
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -27,10 +27,9 @@
 
 #include <regex.h>
 
-#include "die.h"
-#include "error.h"
 #include "fadvise.h"
 #include "linebuffer.h"
+#include "mcel.h"
 #include "quote.h"
 #include "xdectoint.h"
 
@@ -45,16 +44,16 @@
    value, and a string separator.  */
 
 /* Right justified, no leading zeroes.  */
-static char const FORMAT_RIGHT_NOLZ[] = "%*" PRIdMAX "%s";
+static char const FORMAT_RIGHT_NOLZ[] = "%*jd%s";
 
 /* Right justified, leading zeroes.  */
-static char const FORMAT_RIGHT_LZ[] = "%0*" PRIdMAX "%s";
+static char const FORMAT_RIGHT_LZ[] = "%0*jd%s";
 
 /* Left justified, no leading zeroes.  */
-static char const FORMAT_LEFT[] = "%-*" PRIdMAX "%s";
+static char const FORMAT_LEFT[] = "%-*jd%s";
 
 /* Default section delimiter characters.  */
-static char DEFAULT_SECTION_DELIMITERS[] = "\\:";
+static char DEFAULT_SECTION_DELIMITERS[MCEL_LEN_MAX * 2 + 1] = "\\:";
 
 /* Types of input lines: either one of the section delimiters,
    or text to output. */
@@ -97,6 +96,9 @@ static char const *separator_str = "\t";
 
 /* Input section delimiter string (-d).  */
 static char *section_del = DEFAULT_SECTION_DELIMITERS;
+
+/* Input section delimiter length.  */
+static size_t section_del_len;
 
 /* Header delimiter string.  */
 static char *header_del = NULL;
@@ -187,25 +189,41 @@ Write each FILE to standard output, with line numbers added.\n\
       emit_stdin_note ();
       emit_mandatory_arg_note ();
 
-      fputs (_("\
+      oputs (_("\
   -b, --body-numbering=STYLE      use STYLE for numbering body lines\n\
+"));
+      oputs (_("\
   -d, --section-delimiter=CC      use CC for logical page delimiters\n\
+"));
+      oputs (_("\
   -f, --footer-numbering=STYLE    use STYLE for numbering footer lines\n\
-"), stdout);
-      fputs (_("\
+"));
+      oputs (_("\
   -h, --header-numbering=STYLE    use STYLE for numbering header lines\n\
+"));
+      oputs (_("\
   -i, --line-increment=NUMBER     line number increment at each line\n\
+"));
+      oputs (_("\
   -l, --join-blank-lines=NUMBER   group of NUMBER empty lines counted as one\n\
+"));
+      oputs (_("\
   -n, --number-format=FORMAT      insert line numbers according to FORMAT\n\
+"));
+      oputs (_("\
   -p, --no-renumber               do not reset line numbers for each section\n\
+"));
+      oputs (_("\
   -s, --number-separator=STRING   add STRING after (possible) line number\n\
-"), stdout);
-      fputs (_("\
+"));
+      oputs (_("\
   -v, --starting-line-number=NUMBER  first line number for each section\n\
+"));
+      oputs (_("\
   -w, --number-width=NUMBER       use NUMBER columns for line numbers\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
 Default options are: -bt -d'\\:' -fn -hn -i1 -l1 -n'rn' -s<TAB> -v1 -w6\n\
@@ -266,7 +284,7 @@ build_type_arg (char const **typep,
         RE_SYNTAX_POSIX_BASIC & ~RE_CONTEXT_INVALID_DUP & ~RE_NO_EMPTY_RANGES;
       errmsg = re_compile_pattern (optarg, strlen (optarg), regexp);
       if (errmsg)
-        die (EXIT_FAILURE, 0, "%s", (errmsg));
+        error (EXIT_FAILURE, 0, "%s", (errmsg));
       break;
     default:
       rval = false;
@@ -281,11 +299,11 @@ static void
 print_lineno (void)
 {
   if (line_no_overflow)
-    die (EXIT_FAILURE, 0, _("line number overflow"));
+    error (EXIT_FAILURE, 0, _("line number overflow"));
 
   printf (lineno_format, lineno_width, line_no, separator_str);
 
-  if (INT_ADD_WRAPV (line_no, page_incr, &line_no))
+  if (ckd_add (&line_no, line_no, page_incr))
     line_no_overflow = true;
 }
 
@@ -369,7 +387,7 @@ proc_text (void)
                          0, line_buf.length - 1, NULL))
         {
         case -2:
-          die (EXIT_FAILURE, errno, _("error in regular expression search"));
+          error (EXIT_FAILURE, errno, _("error in regular expression search"));
 
         case -1:
           fputs (print_no_line_fmt, stdout);
@@ -390,17 +408,18 @@ check_section (void)
 {
   size_t len = line_buf.length - 1;
 
-  if (len < 2 || footer_del_len < 2
-      || memcmp (line_buf.buffer, section_del, 2))
+  if (section_del_len == 0 || len < section_del_len
+      || footer_del_len < section_del_len
+      || !memeq (line_buf.buffer, section_del, section_del_len))
     return Text;
   if (len == header_del_len
-      && !memcmp (line_buf.buffer, header_del, header_del_len))
+      && memeq (line_buf.buffer, header_del, header_del_len))
     return Header;
   if (len == body_del_len
-      && !memcmp (line_buf.buffer, body_del, body_del_len))
+      && memeq (line_buf.buffer, body_del, body_del_len))
     return Body;
   if (len == footer_del_len
-      && !memcmp (line_buf.buffer, footer_del, footer_del_len))
+      && memeq (line_buf.buffer, footer_del, footer_del_len))
     return Footer;
   return Text;
 }
@@ -427,6 +446,9 @@ process_file (FILE *fp)
           proc_text ();
           break;
         }
+
+      if (ferror (stdout))
+        write_error ();
     }
 }
 
@@ -438,10 +460,11 @@ nl_file (char const *file)
 {
   FILE *stream;
 
-  if (STREQ (file, "-"))
+  if (streq (file, "-"))
     {
       have_read_stdin = true;
       stream = stdin;
+      assume (stream);  /* Pacify GCC bug#109613.  */
     }
   else
     {
@@ -460,7 +483,7 @@ nl_file (char const *file)
   int err = errno;
   if (!ferror (stream))
     err = 0;
-  if (STREQ (file, "-"))
+  if (streq (file, "-"))
     clearerr (stream);		/* Also clear EOF. */
   else if (fclose (stream) != 0 && !err)
     err = errno;
@@ -487,10 +510,9 @@ main (int argc, char **argv)
 
   atexit (close_stdout);
 
-  have_read_stdin = false;
-
   while ((c = getopt_long (argc, argv, "h:b:f:v:i:pl:s:w:n:d:", longopts,
-                           NULL)) != -1)
+                           NULL))
+         != -1)
     {
       switch (c)
         {
@@ -531,22 +553,24 @@ main (int argc, char **argv)
           reset_numbers = false;
           break;
         case 'l':
-          blank_join = xdectoimax (optarg, 1, INTMAX_MAX, "",
-                                   _("invalid line number of blank lines"), 0);
+          blank_join = xnumtoimax (optarg, 10, 1, INTMAX_MAX, "",
+                                   _("invalid line number of blank lines"),
+                                   0, XTOINT_MIN_RANGE | XTOINT_MAX_QUIET);
           break;
         case 's':
           separator_str = optarg;
           break;
         case 'w':
-          lineno_width = xdectoimax (optarg, 1, INT_MAX, "",
-                                     _("invalid line number field width"), 0);
+          lineno_width = xnumtoimax (optarg, 10, 1, INT_MAX, "",
+                                     _("invalid line number field width"),
+                                     0, XTOINT_MIN_RANGE);
           break;
         case 'n':
-          if (STREQ (optarg, "ln"))
+          if (streq (optarg, "ln"))
             lineno_format = FORMAT_LEFT;
-          else if (STREQ (optarg, "rn"))
+          else if (streq (optarg, "rn"))
             lineno_format = FORMAT_RIGHT_NOLZ;
-          else if (STREQ (optarg, "rz"))
+          else if (streq (optarg, "rz"))
             lineno_format = FORMAT_RIGHT_LZ;
           else
             {
@@ -557,14 +581,33 @@ main (int argc, char **argv)
           break;
         case 'd':
           len = strlen (optarg);
-          if (len == 1 || len == 2)  /* POSIX.  */
+          if (1 < MB_CUR_MAX)
             {
-              char *p = section_del;
-              while (*optarg)
-                *p++ = *optarg++;
+              char const *p = optarg;
+              char const *lim = p + len;
+              int n_chars = 0;
+              for (; p < lim && n_chars < 2; ++n_chars)
+                  p += mcel_scan (p, lim).len;
+              if (n_chars == 1)
+                {
+                  /* Build the delimiter in the static buffer, as
+                     section_del may point to a previous -d argument.  */
+                  section_del = DEFAULT_SECTION_DELIMITERS;
+                  memcpy (mempcpy (section_del, optarg, len), ":", sizeof ":");
+                }
+              else
+                section_del = optarg;
             }
           else
-            section_del = optarg;  /* GNU extension.  */
+            {
+              if (len == 1)
+                {
+                  section_del = DEFAULT_SECTION_DELIMITERS;
+                  *section_del = *optarg;
+                }
+              else
+                section_del = optarg;
+            }
           break;
         case_GETOPT_HELP_CHAR;
         case_GETOPT_VERSION_CHAR (PROGRAM_NAME, AUTHORS);
@@ -578,7 +621,7 @@ main (int argc, char **argv)
     usage (EXIT_FAILURE);
 
   /* Initialize the section delimiters.  */
-  len = strlen (section_del);
+  section_del_len = len = strlen (section_del);
 
   header_del_len = len * 3;
   header_del = xmalloc (header_del_len + 1);
@@ -612,7 +655,7 @@ main (int argc, char **argv)
       ok &= nl_file (argv[optind]);
 
   if (have_read_stdin && fclose (stdin) == EOF)
-    die (EXIT_FAILURE, errno, "-");
+    error (EXIT_FAILURE, errno, "-");
 
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

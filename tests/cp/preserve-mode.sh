@@ -1,7 +1,7 @@
 #!/bin/sh
-# ensure that cp's --no-preserve=mode works correctly
+# Check whether cp generates files with correct modes.
 
-# Copyright (C) 2002-2021 Free Software Foundation, Inc.
+# Copyright (C) 2002-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -18,6 +18,8 @@
 
 . "${srcdir=.}/tests/init.sh"; path_prepend_ ./src
 print_ver_ cp
+require_no_default_acl_ .
+working_umask_or_skip_
 
 get_mode() { stat -c%f "$1"; }
 
@@ -54,5 +56,24 @@ if mkfifo fifo; then
   #which wasn't done between v8.20 and 8.29 inclusive
   test "$(get_mode fifo)" = "$(get_mode fifo_copy)" || fail=1
 fi
+
+# Test that plain --preserve=ownership does not affect destination mode.
+rm -f a b c || framework_failure_
+touch a || framework_failure_
+chmod 660 a || framework_failure_
+cp a b || fail=1
+cp --preserve=ownership a c || fail=1
+test "$(get_mode b)" = "$(get_mode c)" || fail=1
+
+# A umask that takes away the owner write bit must not stop cp from
+# writing a new destination file: the contents go through the file
+# descriptor obtained when creating it, which stays writable even
+# though the file's mode does not include the write bit.
+rm -f a b || framework_failure_
+echo not-writable-dest > a || framework_failure_
+chmod 644 a || framework_failure_
+(umask 377 && cp a b) || fail=1
+compare a b || fail=1
+test "$(stat -c%a b)" = 400 || fail=1
 
 Exit $fail

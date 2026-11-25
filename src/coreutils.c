@@ -1,4 +1,4 @@
-/* Copyright (C) 2014-2021 Free Software Foundation, Inc.
+/* Copyright (C) 2014-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -27,8 +27,6 @@
 #endif
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "quote.h"
 
 #ifdef SINGLE_BINARY
@@ -68,8 +66,8 @@ Usage: %s --coreutils-prog=PROGRAM_NAME [PARAMETERS]... \n"),
       fputs (_("\
 Execute the PROGRAM_NAME built-in program with the given PARAMETERS.\n\
 \n"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
 
 #ifdef SINGLE_BINARY
 /* XXX: Ideally we'd like to present "install" here, not "ginstall".  */
@@ -105,7 +103,7 @@ launch_program (char const *prog_name, int prog_argc, char **prog_argv)
   if (false);
   /* Look up the right main program.  */
 # define SINGLE_BINARY_PROGRAM(prog_name_str, main_name) \
-  else if (STREQ (prog_name_str, prog_name)) \
+  else if (streq (prog_name_str, prog_name)) \
     prog_main = single_binary_main_##main_name;
 # include "coreutils.h"
 # undef SINGLE_BINARY_PROGRAM
@@ -116,12 +114,13 @@ launch_program (char const *prog_name, int prog_argc, char **prog_argv)
 
 #if HAVE_PRCTL && defined PR_SET_NAME
   /* Not being able to set the program name is not a fatal error.  */
-  prctl (PR_SET_NAME, prog_argv[0]);
+  prctl (PR_SET_NAME, last_component (prog_argv[0]));
 #endif
 #if HAVE_PRCTL && defined PR_SET_MM_ARG_START
   /* Shift the beginning of the command line to prog_argv[0] (if set) so
-     /proc/pid/cmdline reflects the right value.  */
-  prctl (PR_SET_MM_ARG_START, prog_argv[0]);
+     /proc/$pid/cmdline reflects a more specific value.  Note one needs
+     CAP_SYS_RESOURCE or root privileges for this to succeed.  */
+  prctl (PR_SET_MM, PR_SET_MM_ARG_START, prog_argv[0], 0, 0);
 #endif
 
   exit (prog_main (prog_argc, prog_argv));
@@ -135,7 +134,7 @@ main (int argc, char **argv)
 
   /* Map external name to internal name.  */
   char ginstall[] = "ginstall";
-  if (STREQ (prog_name, "install"))
+  if (streq (prog_name, "install"))
     prog_name = ginstall;
 
   /* If this program is called directly as "coreutils" or if the value of
@@ -149,9 +148,9 @@ main (int argc, char **argv)
        path/to/coreutils --coreutils-prog=someprog someprog ...
      The third argument is what the program will see as argv[0].  */
 
+  size_t nskip = 0;
   if (argc >= 2)
     {
-      size_t nskip = 0;
       char *arg_name = NULL;
 
       /* If calling coreutils directly, the "script" name isn't passed.
@@ -175,13 +174,19 @@ main (int argc, char **argv)
         {
           argv[nskip] = arg_name; /* XXX: Discards any specified path.  */
           launch_program (prog_name, argc - nskip, argv + nskip);
-          die (EXIT_FAILURE, 0, _("unknown program %s"),
-               quote (prog_name));
         }
     }
 
-  /* No known program was selected.  From here on, we behave like any other
-     coreutils program.  */
+  /* Only process options if calling multi-call binary directly,
+     otherwise `foo --version` would succeed.  */
+  if (nskip || (prog_name && !str_endswith (prog_name, "coreutils")))
+    {
+      fprintf (stderr, _("%s: unknown program %s\n"),
+               PROGRAM_NAME, quote (prog_name));
+      exit (EXIT_FAILURE);
+    }
+
+  /* From here on, we behave like any other coreutils program.  */
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   setlocale (LC_ALL, "");
@@ -196,12 +201,6 @@ main (int argc, char **argv)
 
       case_GETOPT_VERSION_CHAR (PROGRAM_NAME, AUTHORS);
       }
-
-  /* Only print the error message when no options have been passed
-     to coreutils.  */
-  if (optind == 1 && prog_name && !STREQ (prog_name, "coreutils"))
-    error (0, 0, _("unknown program %s"),
-           quote (prog_name));
 
   usage (EXIT_FAILURE);
 }

@@ -1,19 +1,33 @@
 /* longlong.h -- definitions for mixed size 32/64 bit arithmetic.
 
-Copyright 1991-2021 Free Software Foundation, Inc.
+Copyright 1991-1994, 1996, 1997, 1999-2005, 2007-2009, 2011-2020 Free Software
+Foundation, Inc.
 
-This file is free software; you can redistribute it and/or modify it under the
-terms of the GNU Lesser General Public License as published by the Free
-Software Foundation; either version 3 of the License, or (at your option) any
-later version.
+This file is part of the GNU MP Library.
 
-This file is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE.  See the GNU Lesser General Public License for more
-details.
+The GNU MP Library is free software; you can redistribute it and/or modify
+it under the terms of either:
 
-You should have received a copy of the GNU Lesser General Public License
-along with this file.  If not, see https://www.gnu.org/licenses/.  */
+  * the GNU Lesser General Public License as published by the Free
+    Software Foundation; either version 3 of the License, or (at your
+    option) any later version.
+
+or
+
+  * the GNU General Public License as published by the Free Software
+    Foundation; either version 2 of the License, or (at your option) any
+    later version.
+
+or both in parallel, as here.
+
+The GNU MP Library is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+for more details.
+
+You should have received copies of the GNU General Public License and the
+GNU Lesser General Public License along with the GNU MP Library.  If not,
+see https://www.gnu.org/licenses/.  */
 
 /* You have to define the following before including this file:
 
@@ -1142,6 +1156,17 @@ extern UWtype __MPN(udiv_qrnnd) (UWtype *, UWtype, UWtype, UWtype);
 #endif /* i960mx */
 #endif /* i960 */
 
+
+#if defined (__loongarch64) && W_TYPE_SIZE == 64
+#define umul_ppmm(w1, w0, u, v) \
+  do {									\
+    UDItype __u = (u), __v = (v);					\
+    (w0) = __u * __v;							\
+    (w1) = __extension__ (unsigned __int128) __u * __v >> 64;		\
+  } while (0)
+#endif
+
+
 #if (defined (__mc68000__) || defined (__mc68020__) || defined(mc68020) \
      || defined (__m68k__) || defined (__mc5200__) || defined (__mc5206e__) \
      || defined (__mc5307__)) && W_TYPE_SIZE == 32
@@ -1638,12 +1663,12 @@ extern UWtype __MPN(udiv_qrnnd) (UWtype *, UWtype, UWtype, UWtype);
   } while (0)
 #endif /* RT/ROMP */
 
-#if defined (__riscv64) && W_TYPE_SIZE == 64
+#if defined (__riscv) && defined (__riscv_mul) && W_TYPE_SIZE == 64
 #define umul_ppmm(ph, pl, u, v) \
   do {									\
     UDItype __u = (u), __v = (v);					\
     (pl) = __u * __v;							\
-    __asm__ ("mulhu\t%2, %1, %0" : "=r" (ph) : "%r" (__u), "r" (__v));	\
+    __asm__ ("mulhu\t%0, %1, %2" : "=r" (ph) : "%r" (__u), "r" (__v));	\
   } while (0)
 #endif
 

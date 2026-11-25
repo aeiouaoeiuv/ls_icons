@@ -1,7 +1,7 @@
 #!/bin/sh
 # Validate kill operation
 
-# Copyright (C) 2015-2021 Free Software Foundation, Inc.
+# Copyright (C) 2015-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -17,7 +17,8 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 . "${srcdir=.}/tests/init.sh"; path_prepend_ ./src
-print_ver_ kill
+print_ver_ kill seq
+getlimits_
 
 # params required
 returns_ 1 env kill || fail=1
@@ -59,5 +60,28 @@ test $(env kill -l $STD_TERM_STATUS $KSH_TERM_STATUS | uniq) = TERM || fail=1
 returns_ 1 env kill -l -1 || fail=1
 returns_ 1 env kill -l -1 0 || fail=1
 returns_ 1 env kill -l INVALID TERM || fail=1
+
+# Verify all signal numbers can be listed
+SIG_LAST_STR=$(env kill -l | tail -n1) || framework_failure_
+SIG_LAST_NUM=$(env kill -l -- "$SIG_LAST_STR") || framework_failure_
+SIG_SEQ=$(env seq -- 0 "$SIG_LAST_NUM") || framework_failure_
+test -n "$SIG_SEQ" || framework_failure_
+env kill -l -- $SIG_SEQ || fail=1
+env kill -t -- $SIG_SEQ || fail=1
+
+# Verify first signal number listed is 0
+test $(env kill -l $(env kill -l | head -n1)) = 0 || fail=1
+
+# If the system's signal.h defines SIGRTMIN and SIGRTMAX, assume that real-time
+# signals are supported.
+if test $SIGRTMIN -gt 0 && test $SIGRTMAX -gt $SIGRTMIN; then
+  rtmin=$(env kill -l | grep -c '^RTMIN')
+  rtmax=$(env kill -l | grep -c '^RTMAX')
+  # We only check that at least RTMIN and RTMAX are listed in the output.
+  # POSIX states the range of signals between SIGRTMIN and SIGRTMAX are
+  # reserved for real-time signals, but does not require that all signals
+  # in the range are usable.
+  test $rtmin -gt 0 && test $rtmax -gt 0 || fail=1
+fi
 
 Exit $fail

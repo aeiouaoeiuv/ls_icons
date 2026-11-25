@@ -1,5 +1,5 @@
 /* chown-core.c -- core functions for changing ownership.
-   Copyright (C) 2000-2021 Free Software Foundation, Inc.
+   Copyright (C) 2000-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,8 +23,9 @@
 #include <grp.h>
 
 #include "system.h"
+#include "assure.h"
 #include "chown-core.h"
-#include "error.h"
+#include "fts-missing.h"
 #include "ignore-value.h"
 #include "root-dev-ino.h"
 #include "xfts.h"
@@ -43,7 +44,7 @@ enum RCH_status
     /* required_uid and/or required_gid are specified, but don't match */
     RC_excluded,
 
-    /* SAME_INODE check failed */
+    /* The file was replaced by another file during the requested change.  */
     RC_inode_changed,
 
     /* open/fchown isn't needed, isn't safe, or doesn't work due to
@@ -73,6 +74,28 @@ chopt_free (struct Chown_option *chopt)
   free (chopt->group_name);
 }
 
+/* Convert the numeric user-id, UID, to a string stored in xmalloc'd memory,
+   and return it.  Use the decimal representation of the ID.  */
+
+static char *
+uid_to_str (uid_t uid)
+{
+  char buf[INT_BUFSIZE_BOUND (intmax_t)];
+  return xstrdup (TYPE_SIGNED (uid_t) ? imaxtostr (uid, buf)
+                  : umaxtostr (uid, buf));
+}
+
+/* Convert the numeric group-id, GID, to a string stored in xmalloc'd memory,
+   and return it.  Use the decimal representation of the ID.  */
+
+static char *
+gid_to_str (gid_t gid)
+{
+  char buf[INT_BUFSIZE_BOUND (intmax_t)];
+  return xstrdup (TYPE_SIGNED (gid_t) ? imaxtostr (gid, buf)
+                  : umaxtostr (gid, buf));
+}
+
 /* Convert the numeric group-id, GID, to a string stored in xmalloc'd memory,
    and return it.  If there's no corresponding group name, use the decimal
    representation of the ID.  */
@@ -80,11 +103,8 @@ chopt_free (struct Chown_option *chopt)
 extern char *
 gid_to_name (gid_t gid)
 {
-  char buf[INT_BUFSIZE_BOUND (intmax_t)];
   struct group *grp = getgrgid (gid);
-  return xstrdup (grp ? grp->gr_name
-                  : TYPE_SIGNED (gid_t) ? imaxtostr (gid, buf)
-                  : umaxtostr (gid, buf));
+  return grp ? xstrdup (grp->gr_name) : gid_to_str (gid);
 }
 
 /* Convert the numeric user-id, UID, to a string stored in xmalloc'd memory,
@@ -94,11 +114,8 @@ gid_to_name (gid_t gid)
 extern char *
 uid_to_name (uid_t uid)
 {
-  char buf[INT_BUFSIZE_BOUND (intmax_t)];
   struct passwd *pwd = getpwuid (uid);
-  return xstrdup (pwd ? pwd->pw_name
-                  : TYPE_SIGNED (uid_t) ? imaxtostr (uid, buf)
-                  : umaxtostr (uid, buf));
+  return pwd ? xstrdup (pwd->pw_name) : uid_to_str (uid);
 }
 
 /* Allocate a string representing USER and GROUP.  */
@@ -129,7 +146,7 @@ user_group_str (char const *user, char const *group)
 }
 
 /* Tell the user how/if the user and group of FILE have been changed.
-   If USER is NULL, give the group-oriented messages.
+   If USER is null, give the group-oriented messages.
    CHANGED describes what (if anything) has happened. */
 
 static void
@@ -137,10 +154,6 @@ describe_change (char const *file, enum Change_status changed,
                  char const *old_user, char const *old_group,
                  char const *user, char const *group)
 {
-  char const *fmt;
-  char *old_spec;
-  char *spec;
-
   if (changed == CH_NOT_APPLIED)
     {
       printf (_("neither symbolic link %s nor referent has been changed\n"),
@@ -148,9 +161,11 @@ describe_change (char const *file, enum Change_status changed,
       return;
     }
 
-  spec = user_group_str (user, group);
-  old_spec = user_group_str (user ? old_user : NULL, group ? old_group : NULL);
+  char *spec = user_group_str (user, group);
+  char *old_spec = user_group_str (user ? old_user : NULL,
+                                   group ? old_group : NULL);
 
+  char const *fmt;
   switch (changed)
     {
     case CH_SUCCEEDED:
@@ -180,8 +195,9 @@ describe_change (char const *file, enum Change_status changed,
              : group ? _("group of %s retained as %s\n")
              : _("ownership of %s retained\n"));
       break;
+    case CH_NOT_APPLIED:
     default:
-      abort ();
+      affirm (false);
     }
 
   printf (fmt, quoteaf (file), old_spec, spec);
@@ -214,14 +230,10 @@ restricted_chown (int cwd_fd, char const *file,
                   uid_t uid, gid_t gid,
                   uid_t required_uid, gid_t required_gid)
 {
-  enum RCH_status status = RC_ok;
-  struct stat st;
-  int open_flags = O_NONBLOCK | O_NOCTTY;
-  int fd;
-
   if (required_uid == (uid_t) -1 && required_gid == (gid_t) -1)
     return RC_do_ordinary_chown;
 
+  int open_flags = O_NONBLOCK | O_NOCTTY;
   if (! S_ISREG (orig_st->st_mode))
     {
       if (S_ISDIR (orig_st->st_mode))
@@ -230,29 +242,26 @@ restricted_chown (int cwd_fd, char const *file,
         return RC_do_ordinary_chown;
     }
 
-  fd = openat (cwd_fd, file, O_RDONLY | open_flags);
+  int fd = openat (cwd_fd, file, O_RDONLY | open_flags);
   if (! (0 <= fd
          || (errno == EACCES && S_ISREG (orig_st->st_mode)
              && 0 <= (fd = openat (cwd_fd, file, O_WRONLY | open_flags)))))
     return (errno == EACCES ? RC_do_ordinary_chown : RC_error);
 
+  enum RCH_status status = RC_ok;
+  struct stat st;
   if (fstat (fd, &st) != 0)
     status = RC_error;
-  else if (! SAME_INODE (*orig_st, st))
+  else if (! psame_inode (orig_st, &st))
     status = RC_inode_changed;
   else if ((required_uid == (uid_t) -1 || required_uid == st.st_uid)
            && (required_gid == (gid_t) -1 || required_gid == st.st_gid))
     {
+#if HAVE_FCHOWN
       if (fchown (fd, uid, gid) == 0)
-        {
-          status = (close (fd) == 0
-                    ? RC_ok : RC_error);
-          return status;
-        }
-      else
-        {
-          status = RC_error;
-        }
+        return close (fd) < 0 ? RC_error : RC_ok;
+#endif
+      status = RC_error;
     }
 
   int saved_errno = errno;
@@ -275,11 +284,11 @@ change_file_owner (FTS *fts, FTSENT *ent,
 {
   char const *file_full_name = ent->fts_path;
   char const *file = ent->fts_accpath;
-  struct stat const *file_stats;
-  struct stat stat_buf;
   bool ok = true;
-  bool do_chown;
-  bool symlink_changed = true;
+  bool ignore_missing = ignore_missing_fts_entry (ent);
+
+  if (ignore_missing && ignorable_fts_error (ent))
+    return true;
 
   switch (ent->fts_info)
     {
@@ -314,7 +323,7 @@ change_file_owner (FTS *fts, FTSENT *ent,
          accessible when control reaches this point.  So, if this is
          the first time we've seen the FTS_NS for this file, tell
          fts_read to stat it "again".  */
-      if (ent->fts_level == 0 && ent->fts_number == 0)
+      if (ent->fts_level == FTS_ROOTLEVEL && ent->fts_number == 0)
         {
           ent->fts_number = 1;
           fts_set (fts, ent, FTS_AGAIN);
@@ -351,6 +360,9 @@ change_file_owner (FTS *fts, FTSENT *ent,
       break;
     }
 
+  bool do_chown;
+  struct stat stat_buf;
+  struct stat const *file_stats;
   if (!ok)
     {
       do_chown = false;
@@ -372,15 +384,19 @@ change_file_owner (FTS *fts, FTSENT *ent,
          stat it to get info on the referent.  */
       if (chopt->affect_symlink_referent && S_ISLNK (file_stats->st_mode))
         {
-          if (fstatat (fts->fts_cwd_fd, file, &stat_buf, 0) != 0)
+          if (0 <= fstatat (fts->fts_cwd_fd, file, &stat_buf, 0))
+            file_stats = &stat_buf;
+          else
             {
+              if (ignore_missing
+                  && ignorable_traversal_errno (errno))
+                return true;
               if (! chopt->force_silent)
                 error (0, errno, _("cannot dereference %s"),
                        quoteaf (file_full_name));
               ok = false;
+              file_stats = NULL;
             }
-
-          file_stats = &stat_buf;
         }
 
       do_chown = (ok
@@ -399,6 +415,7 @@ change_file_owner (FTS *fts, FTSENT *ent,
       return false;
     }
 
+  bool symlink_changed = true;
   if (do_chown)
     {
       if ( ! chopt->affect_symlink_referent)
@@ -408,7 +425,7 @@ change_file_owner (FTS *fts, FTSENT *ent,
           /* Ignore any error due to lack of support; POSIX requires
              this behavior for top-level symbolic links with -h, and
              implies that it's required for all symbolic links.  */
-          if (!ok && errno == EOPNOTSUPP)
+          if (!ok && is_ENOTSUP (errno))
             {
               ok = true;
               symlink_changed = false;
@@ -450,7 +467,7 @@ change_file_owner (FTS *fts, FTSENT *ent,
               break;
 
             default:
-              abort ();
+              unreachable ();
             }
         }
 
@@ -461,11 +478,17 @@ change_file_owner (FTS *fts, FTSENT *ent,
          by some other user and operating on files in a directory
          where M has write access.  */
 
-      if (do_chown && !ok && ! chopt->force_silent)
-        error (0, errno, (uid != (uid_t) -1
-                          ? _("changing ownership of %s")
-                          : _("changing group of %s")),
-               quoteaf (file_full_name));
+      if (do_chown && !ok)
+        {
+          if (ignore_missing
+              && ignorable_traversal_errno (errno))
+            return true;
+          if (! chopt->force_silent)
+            error (0, errno, (uid != (uid_t) -1
+                              ? _("changing ownership of %s")
+                              : _("changing group of %s")),
+                   quoteaf (file_full_name));
+        }
     }
 
   if (chopt->verbosity != V_off)
@@ -482,13 +505,25 @@ change_file_owner (FTS *fts, FTSENT *ent,
              : !symlink_changed ? CH_NOT_APPLIED
              : !changed ? CH_NO_CHANGE_REQUESTED
              : CH_SUCCEEDED);
-          char *old_usr = file_stats ? uid_to_name (file_stats->st_uid) : NULL;
-          char *old_grp = file_stats ? gid_to_name (file_stats->st_gid) : NULL;
+          char *old_usr = (file_stats
+                           ? uid_to_name (file_stats->st_uid) : NULL);
+          char *old_grp = (file_stats
+                           ? gid_to_name (file_stats->st_gid) : NULL);
+          char *new_usr = chopt->user_name
+                          ? chopt->user_name : uid != -1
+                                               ? uid_to_str (uid) : NULL;
+          char *new_grp = chopt->group_name
+                          ? chopt->group_name : gid != -1
+                                               ? gid_to_str (gid) : NULL;
           describe_change (file_full_name, ch_status,
                            old_usr, old_grp,
-                           chopt->user_name, chopt->group_name);
+                           new_usr, new_grp);
           free (old_usr);
           free (old_grp);
+          if (new_usr != chopt->user_name)
+            free (new_usr);
+          if (new_grp != chopt->group_name)
+            free (new_grp);
         }
     }
 
@@ -526,9 +561,8 @@ chown_files (char **files, int bit_flags,
 
   while (true)
     {
-      FTSENT *ent;
+      FTSENT *ent = fts_read (fts);
 
-      ent = fts_read (fts);
       if (ent == NULL)
         {
           if (errno != 0)

@@ -1,5 +1,5 @@
 /* nproc - print the number of processors.
-   Copyright (C) 2009-2021 Free Software Foundation, Inc.
+   Copyright (C) 2009-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,7 +22,6 @@
 #include <sys/types.h>
 
 #include "system.h"
-#include "error.h"
 #include "nproc.h"
 #include "quote.h"
 #include "xdectoint.h"
@@ -57,16 +56,24 @@ usage (int status)
       printf (_("Usage: %s [OPTION]...\n"), program_name);
       fputs (_("\
 Print the number of processing units available to the current process,\n\
-which may be less than the number of online processors\n\
+which may be less than the number of online processors.\n\
+If the 'OMP_NUM_THREADS' or 'OMP_THREAD_LIMIT' environment variables are set,\n\
+then they will determine the minimum and maximum returned value respectively.\n\
 \n\
 "), stdout);
-      fputs (_("\
-      --all      print the number of installed processors\n\
-      --ignore=N  if possible, exclude N processing units\n\
-"), stdout);
+      oputs (_("\
+      --all\n\
+         print the number of installed processors,\n\
+         disregarding any OpenMP environment variables, or CPU quotas.\n\
+"));
+      oputs (_("\
+      --ignore=N\n\
+         if possible, exclude N processing units.\n\
+         The result is guaranteed to be at least 1.\n\
+"));
 
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -75,7 +82,7 @@ which may be less than the number of online processors\n\
 int
 main (int argc, char **argv)
 {
-  unsigned long nproc, ignore = 0;
+  unsigned long ignore = 0;
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   setlocale (LC_ALL, "");
@@ -102,7 +109,8 @@ main (int argc, char **argv)
           break;
 
         case IGNORE_OPTION:
-          ignore = xdectoumax (optarg, 0, ULONG_MAX, "", _("invalid number"),0);
+          ignore = xnumtoumax (optarg, 10, 0, ULONG_MAX, "",
+                               _("invalid number"), 0, XTOINT_MAX_QUIET);
           break;
 
         default:
@@ -116,7 +124,7 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
-  nproc = num_processors (mode);
+  unsigned long nproc = num_processors (mode);
 
   if (ignore < nproc)
     nproc -= ignore;

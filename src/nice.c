@@ -1,5 +1,5 @@
 /* nice -- run a program with modified niceness
-   Copyright (C) 1990-2021 Free Software Foundation, Inc.
+   Copyright (C) 1990-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -29,8 +29,7 @@
 # include <sys/resource.h>
 #endif
 
-#include "die.h"
-#include "error.h"
+#include "c-ctype.h"
 #include "quote.h"
 #include "xstrtol.h"
 
@@ -80,12 +79,14 @@ With no COMMAND, print the current niceness.  Niceness values range from\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-  -n, --adjustment=N   add integer N to the niceness (default 10)\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -n, --adjustment=N\n\
+         add integer N to the niceness (default 10)\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       printf (USAGE_BUILTIN_WARNING, PROGRAM_NAME);
+      emit_exec_status (PROGRAM_NAME);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -119,7 +120,7 @@ main (int argc, char **argv)
     {
       char const *s = argv[i];
 
-      if (s[0] == '-' && ISDIGIT (s[1 + (s[1] == '-' || s[1] == '+')]))
+      if (s[0] == '-' && c_isdigit (s[1 + (s[1] == '-' || s[1] == '+')]))
         {
           adjustment_given = s + 1;
           ++i;
@@ -167,12 +168,46 @@ main (int argc, char **argv)
       /* If the requested adjustment is outside the valid range,
          silently bring it to just within range; this mimics what
          "setpriority" and "nice" do.  */
+#if (defined __gnu_hurd__                                               \
+     && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 43)))
+      /* GNU/Hurd's nice(2) only supported 0 to (2 * NZERO - 2) niceness
+         until glibc 2.43.  */
+      enum { MIN_ADJUSTMENT = 0, MAX_ADJUSTMENT = 2 * NZERO - 2 };
+#else
       enum { MIN_ADJUSTMENT = 1 - 2 * NZERO, MAX_ADJUSTMENT = 2 * NZERO - 1 };
+#endif
       long int tmp;
       if (LONGINT_OVERFLOW < xstrtol (adjustment_given, NULL, 10, &tmp, ""))
-        die (EXIT_CANCELED, 0, _("invalid adjustment %s"),
-             quote (adjustment_given));
+        error (EXIT_CANCELED, 0, _("invalid adjustment %s"),
+               quote (adjustment_given));
+#if (defined __gnu_hurd__                                               \
+     && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 43)))
+      /* GNU/Hurd's nice(2) also did not clamp the new niceness into the
+         supported range until glibc 2.43.
+         See <https://sourceware.org/PR33614>.  */
+      errno = 0;
+      current_niceness = GET_NICENESS ();
+      if (current_niceness == -1 && errno != 0)
+        error (EXIT_CANCELED, errno, _("cannot get niceness"));
+      if (tmp < 0)
+        {
+          int sum;
+          if (ckd_add (&sum, current_niceness, tmp) || sum < MIN_ADJUSTMENT)
+            adjustment = MIN_ADJUSTMENT - current_niceness;
+          else
+            adjustment = tmp;
+        }
+      else
+        {
+          int sum;
+          if (ckd_add (&sum, current_niceness, tmp) || MAX_ADJUSTMENT < sum)
+            adjustment = MAX_ADJUSTMENT - current_niceness;
+          else
+            adjustment = tmp;
+        }
+#else
       adjustment = MAX (MIN_ADJUSTMENT, MIN (tmp, MAX_ADJUSTMENT));
+#endif
     }
 
   if (i == argc)
@@ -186,7 +221,7 @@ main (int argc, char **argv)
       errno = 0;
       current_niceness = GET_NICENESS ();
       if (current_niceness == -1 && errno != 0)
-        die (EXIT_CANCELED, errno, _("cannot get niceness"));
+        error (EXIT_CANCELED, errno, _("cannot get niceness"));
       printf ("%d\n", current_niceness);
       return EXIT_SUCCESS;
     }
@@ -197,7 +232,7 @@ main (int argc, char **argv)
 #else
   current_niceness = GET_NICENESS ();
   if (current_niceness == -1 && errno != 0)
-    die (EXIT_CANCELED, errno, _("cannot get niceness"));
+    error (EXIT_CANCELED, errno, _("cannot get niceness"));
   ok = (setpriority (PRIO_PROCESS, 0, current_niceness + adjustment) == 0);
 #endif
   if (!ok)

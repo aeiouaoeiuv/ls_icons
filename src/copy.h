@@ -1,5 +1,5 @@
 /* core functions for copying files and directories
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -19,7 +19,6 @@
 #ifndef COPY_H
 # define COPY_H
 
-# include <stdbool.h>
 # include "hash.h"
 
 struct selabel_handle;
@@ -58,13 +57,29 @@ enum Reflink_type
   REFLINK_ALWAYS
 };
 
+/* Control how existing destination files are updated.  */
+enum Update_type
+{
+  /* Always update..  */
+  UPDATE_ALL,
+
+  /* Update if (nondirectory) dest has older mtime.  */
+  UPDATE_OLDER,
+
+  /* Leave existing files.  */
+  UPDATE_NONE,
+
+  /* Leave existing files, but exit failure if existing files.  */
+  UPDATE_NONE_FAIL,
+};
+
 /* This type is used to help mv (via copy.c) distinguish these cases.  */
 enum Interactive
 {
-  I_ALWAYS_YES = 1,
-  I_ALWAYS_NO,
-  I_ASK_USER,
-  I_UNSPECIFIED
+  I_UNSPECIFIED,
+  I_ALWAYS_YES,      /* -f.  */
+  I_ALWAYS_SKIP,     /* -n (Skip and ignore).  */
+  I_ASK_USER,        /* -i.  */
 };
 
 /* How to handle symbolic links.  */
@@ -116,8 +131,14 @@ struct cp_options
      if SET_MODE is nonzero.  */
   mode_t mode;
 
-  /* If true, copy all files except (directories and, if not dereferencing
-     them, symbolic links,) as if they were regular files.  */
+  /* Set the ownership of the destination file to OWNER:GROUP if
+     SET_MODE is true.  Either or both values can be set to -1 to
+     leave that ID unchanged.  */
+  uid_t owner;
+  gid_t group;
+
+  /* If true, copy all files except directories (and, if not dereferencing
+     them, symbolic links) as if they were regular files.  */
   bool copy_as_regular;
 
   /* If true, remove each existing destination nondirectory before
@@ -135,9 +156,13 @@ struct cp_options
      Create destination directories as usual. */
   bool hard_link;
 
-  /* If true, rather than copying, first attempt to use rename.
-     If that fails, then resort to copying.  */
-  bool move_mode;
+  /* If MOVE_MODE, first try to rename.
+     If that fails and NO_COPY, fail instead of copying.  */
+  bool move_mode, no_copy;
+
+  /* Exchange instead of renaming.  Valid only if MOVE_MODE and if
+     BACKUP_TYPE == no_backups.  */
+  bool exchange;
 
   /* If true, install(1) is the caller.  */
   bool install_mode;
@@ -215,12 +240,11 @@ struct cp_options
      while with 'cp --preserve=all' or 'cp -a', it is "false". */
   bool require_preserve_xattr;
 
-  /* This allows us to output warnings in cases 2 and 4 below,
+  /* This allows us to output warnings in case 2 below,
      while being quiet for case 1 (when reduce_diagnostics is true).
        1. cp -a                       try to copy xattrs with no errors
        2. cp --preserve=all           copy xattrs with all but ENOTSUP warnings
        3. cp --preserve=xattr,context copy xattrs with all errors
-       4. mv                          copy xattrs with all but ENOTSUP warnings
    */
   bool reduce_diagnostics;
 
@@ -236,12 +260,17 @@ struct cp_options
      Create destination directories as usual. */
   bool symbolic_link;
 
-  /* If true, do not copy a nondirectory that has an existing destination
-     with the same or newer modification time. */
-  bool update;
+  /* Control if destination files are replaced.  */
+  enum Update_type update;
 
   /* If true, display the names of the files before copying them. */
   bool verbose;
+
+  /* If true, follow existing symlinks to directories when copying. */
+  bool keep_directory_symlink;
+
+  /* If true, display details of how files were copied.  */
+  bool debug;
 
   /* If true, stdin is a tty.  */
   bool stdin_tty;
@@ -274,38 +303,76 @@ struct cp_options
      this feature.  */
   Hash_table *dest_info;
 
-  /* FIXME */
+  /* This is a set of dev/inode pairs.  This allows 'cp' to warn when the
+     same file is given multiple times on the command line. E.g., with
+     invocations like this:
+       rm -rf a b; touch a; mkdir b; cp a a ./a b
+     Use src_info_init to initialize it, or set it to NULL to disable
+     this feature.  */
   Hash_table *src_info;
 };
 
-/* Arrange to make rename calls go through the wrapper function
-   on systems with a rename function that fails for a source file name
-   specified with a trailing slash.  */
-# if RENAME_TRAILING_SLASH_BUG
-int rpl_rename (char const *, char const *);
-#  undef rename
-#  define rename rpl_rename
-# endif
+enum copy_debug_val
+  {
+   /* COPY_DEBUG_MAX is a dummy that ensures that any errno
+      value can be assigned to an enum copy_debug_val.
+      The other enum constants are negative,
+      so that they do not collide with errno values.  */
+   COPY_DEBUG_MAX = INT_MAX,
+
+   COPY_DEBUG_UNKNOWN = -1,
+   COPY_DEBUG_NO = -2,
+   COPY_DEBUG_YES = -3,
+   COPY_DEBUG_EXTERNAL = -4,
+   COPY_DEBUG_EXTERNAL_INTERNAL = -5,
+   COPY_DEBUG_AVOIDED = -6,
+  };
+
+/* debug info about the last file copy.  */
+struct copy_debug
+{
+  enum copy_debug_val offload;
+  enum copy_debug_val reflink;
+  enum copy_debug_val sparse_detection;
+};
+
+/* The type of a large counter.  Although it is always nonnegative,
+   it is signed to help signed overflow checking catch any bugs.  */
+typedef intmax_t count_t;
+# define COUNT_MAX INTMAX_MAX
 
 bool copy (char const *src_name, char const *dst_name,
-           bool nonexistent_dst, const struct cp_options *options,
-           bool *copy_into_self, bool *rename_succeeded);
+           int dst_dirfd, char const *dst_relname,
+           int nonexistent_dst, const struct cp_options *options,
+           bool *copy_into_self, bool *rename_succeeded)
+  _GL_ATTRIBUTE_NONNULL ((1, 2, 4, 6, 7));
+
+intmax_t copy_file_data (int ifd, struct stat const *ist, off_t ipos,
+                         char const *iname,
+                         int ofd, struct stat const *ost, off_t opos,
+                         char const *oname,
+                         count_t ibytes, struct cp_options const *x,
+                         struct copy_debug *copy_debug)
+  _GL_ATTRIBUTE_NONNULL ((2, 4, 6, 8, 10, 11));
 
 extern bool set_process_security_ctx (char const *src_name,
                                       char const *dst_name,
                                       mode_t mode, bool new_dst,
-                                      const struct cp_options *x);
+                                      const struct cp_options *x)
+  _GL_ATTRIBUTE_NONNULL ();
 
 extern bool set_file_security_ctx (char const *dst_name,
-                                   bool recurse, const struct cp_options *x);
+                                   bool recurse, const struct cp_options *x)
+  _GL_ATTRIBUTE_NONNULL ();
 
-void dest_info_init (struct cp_options *);
-void dest_info_free (struct cp_options *);
-void src_info_init (struct cp_options *);
-void src_info_free (struct cp_options *);
+void dest_info_init (struct cp_options *) _GL_ATTRIBUTE_NONNULL ();
+void dest_info_free (struct cp_options *) _GL_ATTRIBUTE_NONNULL ();
+void src_info_init (struct cp_options *) _GL_ATTRIBUTE_NONNULL ();
+void src_info_free (struct cp_options *) _GL_ATTRIBUTE_NONNULL ();
 
-void cp_options_default (struct cp_options *);
-bool chown_failure_ok (struct cp_options const *) _GL_ATTRIBUTE_PURE;
+void cp_options_default (struct cp_options *) _GL_ATTRIBUTE_NONNULL ();
+bool chown_failure_ok (struct cp_options const *)
+  _GL_ATTRIBUTE_NONNULL () _GL_ATTRIBUTE_PURE;
 mode_t cached_umask (void);
 
 #endif

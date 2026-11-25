@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 # Test pr.
 
-# Copyright (C) 2008-2021 Free Software Foundation, Inc.
+# Copyright (C) 2008-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -415,6 +415,9 @@ my @tv = (
 ['padding2', '-t -n,64', "1\n", (" "x 63)."1,1\n", 0],
 # Ensure we handle buffer truncation correctly
 ['padding3', '-t -N1000000 -n,1', "1\n", "0,1\n", 0],
+
+# This entered an infinite loop before coreutils-9.4
+['page-length1', '-dl1', "", "", 0],
 );
 
 # Convert the above old-style test vectors to the newer
@@ -487,6 +490,22 @@ push @Tests,
     {IN=>{1=>"a\tb\tc\n"}},
     {IN=>{2=>"m\tn\to\n"}},
      {OUT=>join("\t", qw(a b c m n o)) . "\n"} ];
+
+# With -m, -s joins the lines unpadded, unless a width is given.
+# -S keeps the padding, and -W wins over -w.
+push @Tests,
+   ['merge-sep', '-m -t -s,',
+    {IN=>{1=>"line one\n2\n"}}, {IN=>{2=>"x\ny\n"}},
+    {OUT=>"line one,x\n2,y\n"} ],
+   ['merge-sep-w', '-m -t -s, -w 10',
+    {IN=>{1=>"line one\n2\n"}}, {IN=>{2=>"x\ny\n"}},
+    {OUT=>"line,x\n2   ,y\n"} ],
+   ['merge-Sep-w', '-m -t -S, -w 10',
+    {IN=>{1=>"line one\n2\n"}}, {IN=>{2=>"x\ny\n"}},
+    {OUT=>"line,x\n2   ,y\n"} ],
+   ['merge-sep-W', '-m -t -s, -W 10 -w 20',
+    {IN=>{1=>"line one\n2\n"}}, {IN=>{2=>"x\ny\n"}},
+    {OUT=>"line,x\n2   ,y\n"} ];
 
 # This resulted in reading invalid memory before coreutils-8.26
 push @Tests,

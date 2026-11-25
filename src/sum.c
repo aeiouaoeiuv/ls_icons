@@ -1,5 +1,5 @@
 /* sum -- checksum and count the blocks in a file
-   Copyright (C) 1986-2021 Free Software Foundation, Inc.
+   Copyright (C) 1986-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <sys/types.h>
+#include <endian.h>
 #include "system.h"
 #include "human.h"
 #include "sum.h"
@@ -30,13 +31,13 @@
    Return -1 on error, 0 on success.  */
 
 int
-bsd_sum_stream (FILE *stream, void *resstream, uintmax_t *length)
+bsd_sum_stream (FILE *stream, void *resstream, intmax_t *length)
 {
   int ret = -1;
-  size_t sum, n;
+  idx_t sum;
   int checksum = 0;	/* The checksum mod 2^16. */
-  uintmax_t total_bytes = 0;	/* The number of bytes. */
-  static const size_t buffer_length = 32768;
+  intmax_t total_bytes = 0;	/* The number of bytes. */
+  enum { buffer_length = 32768 };
   uint8_t *buffer = malloc (buffer_length);
 
   if (! buffer)
@@ -50,18 +51,18 @@ bsd_sum_stream (FILE *stream, void *resstream, uintmax_t *length)
     /* Read block */
     while (true)
     {
-      n = fread (buffer + sum, 1, buffer_length - sum, stream);
-      sum += n;
-
-      if (buffer_length == sum)
-        break;
-
+      size_t n = fread (buffer + sum, 1, buffer_length - sum, stream);
       if (n == 0)
         {
           if (ferror (stream))
             goto cleanup_buffer;
           goto final_process;
         }
+
+      sum += n;
+
+      if (buffer_length == sum)
+        break;
 
       if (feof (stream))
         goto final_process;
@@ -73,28 +74,26 @@ bsd_sum_stream (FILE *stream, void *resstream, uintmax_t *length)
         checksum += buffer[i];
         checksum &= 0xffff;	/* Keep it within bounds. */
       }
-    if (total_bytes + sum < total_bytes)
+    if (ckd_add (&total_bytes, total_bytes, sum))
       {
         errno = EOVERFLOW;
         goto cleanup_buffer;
       }
-    total_bytes += sum;
   }
 
 final_process:;
 
-  for (size_t i = 0; i < sum; i++)
+  for (idx_t i = 0; i < sum; i++)
     {
       checksum = (checksum >> 1) + ((checksum & 1) << 15);
       checksum += buffer[i];
       checksum &= 0xffff;	/* Keep it within bounds. */
     }
-  if (total_bytes + sum < total_bytes)
+  if (ckd_add (&total_bytes, total_bytes, sum))
     {
       errno = EOVERFLOW;
       goto cleanup_buffer;
     }
-  total_bytes += sum;
 
   memcpy (resstream, &checksum, sizeof checksum);
   *length = total_bytes;
@@ -108,12 +107,12 @@ cleanup_buffer:
    Return -1 on error, 0 on success.  */
 
 int
-sysv_sum_stream (FILE *stream, void *resstream, uintmax_t *length)
+sysv_sum_stream (FILE *stream, void *resstream, intmax_t *length)
 {
   int ret = -1;
-  size_t sum, n;
-  uintmax_t total_bytes = 0;
-  static const size_t buffer_length = 32768;
+  idx_t sum;
+  intmax_t total_bytes = 0;
+  enum { buffer_length = 32768 };
   uint8_t *buffer = malloc (buffer_length);
 
   if (! buffer)
@@ -130,18 +129,18 @@ sysv_sum_stream (FILE *stream, void *resstream, uintmax_t *length)
     /* Read block */
     while (true)
     {
-      n = fread (buffer + sum, 1, buffer_length - sum, stream);
-      sum += n;
-
-      if (buffer_length == sum)
-        break;
-
+      size_t n = fread (buffer + sum, 1, buffer_length - sum, stream);
       if (n == 0)
         {
           if (ferror (stream))
             goto cleanup_buffer;
           goto final_process;
         }
+
+      sum += n;
+
+      if (buffer_length == sum)
+        break;
 
       if (feof (stream))
         goto final_process;
@@ -183,10 +182,18 @@ cleanup_buffer:
    If ARGS is true, also print the FILE name.  */
 
 void
-output_bsd (char const *file, int binary_file, void const *digest,
-            bool tagged, unsigned char delim, bool args _GL_UNUSED,
-            uintmax_t length _GL_UNUSED)
+output_bsd (char const *file, MAYBE_UNUSED int binary_file, void const *digest,
+            bool raw, MAYBE_UNUSED bool tagged, unsigned char delim, bool args,
+            intmax_t length)
 {
+  if (raw)
+    {
+      /* Output in network byte order (big endian).  */
+      uint16_t out_int = *(int *)digest;
+      out_int = htobe16 (out_int);
+      fwrite (&out_int, 1, 16/8, stdout);
+      return;
+    }
 
   char hbuf[LONGEST_HUMAN_READABLE + 1];
   printf ("%05d %5s", *(int *)digest,
@@ -200,10 +207,18 @@ output_bsd (char const *file, int binary_file, void const *digest,
    If ARGS is true, also print the FILE name.  */
 
 void
-output_sysv (char const *file, int binary_file, void const *digest,
-             bool tagged, unsigned char delim, bool args _GL_UNUSED,
-             uintmax_t length _GL_UNUSED)
+output_sysv (char const *file, MAYBE_UNUSED int binary_file,
+             void const *digest, bool raw, MAYBE_UNUSED bool tagged,
+             unsigned char delim, bool args, intmax_t length)
 {
+  if (raw)
+    {
+      /* Output in network byte order (big endian).  */
+      uint16_t out_int = *(int *)digest;
+      out_int = htobe16 (out_int);
+      fwrite (&out_int, 1, 16/8, stdout);
+      return;
+    }
 
   char hbuf[LONGEST_HUMAN_READABLE + 1];
   printf ("%d %s", *(int *)digest,

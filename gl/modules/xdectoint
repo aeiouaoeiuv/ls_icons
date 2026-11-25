@@ -8,9 +8,11 @@ lib/xdectoimax.c
 lib/xdectoumax.c
 
 Depends-on:
+bool
 error
-errno
+errno-h
 quote
+verify
 xstrtoimax
 xstrtoumax
 

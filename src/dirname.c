@@ -1,6 +1,6 @@
 /* dirname -- strip suffix from file name
 
-   Copyright (C) 1990-2021 Free Software Foundation, Inc.
+   Copyright (C) 1990-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,8 +22,8 @@
 #include <stdio.h>
 #include <sys/types.h>
 
+#include "argmatch.h"  /* argmatch($QUOTING_STYLE).  */
 #include "system.h"
-#include "error.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "dirname"
@@ -31,6 +31,8 @@
 #define AUTHORS \
   proper_name ("David MacKenzie"), \
   proper_name ("Jim Meyering")
+
+static bool quote_output;
 
 static struct option const longopts[] =
 {
@@ -56,11 +58,12 @@ Output each NAME with its last non-slash component and trailing slashes\n\
 removed; if NAME contains no /'s, output '.' (meaning the current directory).\n\
 \n\
 "), stdout);
-      fputs (_("\
-  -z, --zero     end each output line with NUL, not newline\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -z, --zero\n\
+         end each output line with NUL, not newline\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       printf (_("\
 \n\
 Examples:\n\
@@ -77,10 +80,7 @@ Examples:\n\
 int
 main (int argc, char **argv)
 {
-  static char const dot = '.';
   bool use_nuls = false;
-  char const *result;
-  size_t len;
 
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
@@ -117,17 +117,35 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
+
+  if (!use_nuls && isatty (STDOUT_FILENO))
+    {
+      int qs = getenv_quoting_style ();
+      if (qs < 0)
+        qs = shell_escape_quoting_style;
+      if (qs != literal_quoting_style)
+        {
+          set_quoting_style (NULL, qs);
+          quote_output = true;
+        }
+    }
+
   for (; optind < argc; optind++)
     {
-      result = argv[optind];
-      len = dir_len (result);
+      char const *result = argv[optind];
+      idx_t len = dir_len (result);
 
       if (! len)
         {
+          static char const dot = '.';
           result = &dot;
           len = 1;
         }
-
+      if (quote_output)
+        {
+          result = quoteN_mem (result, len);
+          len = strlen (result);
+        }
       fwrite (result, 1, len, stdout);
       putchar (use_nuls ? '\0' :'\n');
     }

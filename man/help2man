@@ -2,8 +2,8 @@
 
 # Generate a short man page from --help and --version output.
 # Copyright (C) 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2009,
-# 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2020, 2021 Free Software
-# Foundation, Inc.
+# 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2020, 2021, 2022, 2025
+# Free Software Foundation, Inc.
 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -29,7 +29,7 @@ use Text::Tabs qw(expand);
 use POSIX qw(strftime setlocale LC_ALL);
 
 my $this_program = 'help2man';
-my $this_version = '1.48.5';
+my $this_version = '1.50.1';
 
 sub _ { $_[0] }
 sub configure_locale
@@ -49,13 +49,17 @@ sub program_basename;
 sub get_option_value;
 sub convert_option;
 sub fix_italic_spacing;
+sub generic_indented_tag_line;
+sub indented_tag_line;
+sub set_indent;
+sub visual_length;
 
 my $version_info = enc_user sprintf _(<<'EOT'), $this_program, $this_version;
 GNU %s %s
 
 Copyright (C) 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2009,
-2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2020, 2021 Free Software
-Foundation, Inc.
+2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2020, 2021, 2022, 2025 Free
+Software Foundation, Inc.
 This is free software; see the source for copying conditions.  There is NO
 warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
@@ -78,6 +82,8 @@ Usage: %s [OPTION]... EXECUTABLE
  -p, --info-page=TEXT    name of Texinfo manual
  -N, --no-info           suppress pointer to Texinfo manual
  -l, --libtool           exclude the `lt-' from the program name
+     --loose-indent      relax matching of indented continuation lines
+ -b, --bold-refs         apply bold style to references
      --help              print this help, then exit
      --version           print version number, then exit
 
@@ -86,8 +92,8 @@ stdout although alternatives may be specified using:
 
  -h, --help-option=STRING     help option string
  -v, --version-option=STRING  version option string
- --version-string=STRING      version string
- --no-discard-stderr          include stderr when parsing option output
+     --version-string=STRING  version string
+     --no-discard-stderr      include stderr when parsing option output
 
 Report bugs to <bug-help2man@gnu.org>.
 EOT
@@ -97,9 +103,10 @@ my $manual = '';
 my $source = '';
 my $help_option = '--help';
 my $version_option = '--version';
+my $loose_indent = 0;
 my $discard_stderr = 1;
 my ($opt_name, @opt_include, $opt_output, $opt_info, $opt_no_info, $opt_libtool,
-    $version_text);
+    $opt_bold_refs, $version_text);
 
 my %opt_def = (
     'n|name=s'		 => \$opt_name,
@@ -113,6 +120,8 @@ my %opt_def = (
     'p|info-page=s'	 => \$opt_info,
     'N|no-info'		 => \$opt_no_info,
     'l|libtool'		 => \$opt_libtool,
+    'loose-indent!'	 => \$loose_indent,
+    'b|bold-refs'	 => \$opt_bold_refs,
     'help'		 => sub { print $help_info; exit },
     'version'		 => sub { print $version_info; exit },
     'h|help-option=s'	 => \$help_option,
@@ -178,13 +187,13 @@ while (@opt_include)
 	    $key =~ s/^\s+//;
 	    $key =~ s/\s+$//;
 	    $hash = \%include;
-	    # Handle explicit [<section], [=section] and [>section]
+	    # Handle explicit [<section], [=section] and [>section].
 	    if ($key =~ s/^([<>=])\s*//)
 	    {
 		if    ($1 eq '>') { $hash = \%append; }
 		elsif ($1 eq '=') { $hash = \%replace; }
 	    }
-	    # NAME/SYNOPSIS replace by default
+	    # NAME/SYNOPSIS replace by default.
 	    elsif ($key eq _('NAME') or $key eq _('SYNOPSIS'))
 	    {
 		$hash = \%replace;
@@ -220,7 +229,7 @@ while (@opt_include)
 	# revision info.
 	unless ($key)
 	{
-	    # handle options
+	    # Handle options.
 	    if (/^-/)
 	    {
 		local @ARGV = shellwords $_;
@@ -265,10 +274,14 @@ if (exists $ENV{SOURCE_DATE_EPOCH} and $ENV{SOURCE_DATE_EPOCH} =~ /^(\d+)$/)
 # the English version expands to the month as a word and the full year.  It
 # is used on the footer of the generated manual pages.  If in doubt, you may
 # just use %x as the value (which should be the full locale-specific date).
-my $date = enc strftime _("%B %Y"), localtime $epoch_secs;
+my $date = strftime _("%B %Y"), localtime $epoch_secs;
 my $program = program_basename $ARGV[0];
 my $package = $program;
 my $version;
+
+# Normalize help text that embeds argv[0], so examples are formatted
+# using the displayed program name rather than a temporary build path.
+$help_text =~ s/\Q$ARGV[0]\E/$program/g if $ARGV[0] ne $program;
 
 if ($opt_output)
 {
@@ -340,15 +353,15 @@ for ($replace{_('NAME')} || ($include{_('NAME')} ||= ''))
 # Man pages traditionally have the page title in caps.
 my $PROGRAM = uc $program;
 
-# Set default page head/footers
+# Set default page head/footers.
 $source ||= "$package $version";
 unless ($manual)
 {
     for ($section)
     {
-	if (/^(1[Mm]|8)/) { $manual = enc _('System Administration Utilities') }
-	elsif (/^6/)	  { $manual = enc _('Games') }
-	else		  { $manual = enc _('User Commands') }
+	if (/^(1[Mm]|8)/) { $manual = _('System Administration Utilities') }
+	elsif (/^6/)	  { $manual = _('Games') }
+	else		  { $manual = _('User Commands') }
     }
 }
 
@@ -400,7 +413,7 @@ if ($help_text =~ s/^($PAT_USAGE):( +(\S+))(.*)((?:\n(?: {6}\1| *($PAT_USAGE_CON
 my $sect = _('DESCRIPTION');
 $_ = "$help_text\n\n$version_text";
 
-# Normalise paragraph breaks.
+# Normalize paragraph breaks.
 s/^\n+//;
 s/\n*$/\n/;
 s/\n\n+/\n\n/g;
@@ -440,27 +453,34 @@ s/([^\n])\n($PAT_BUGS|$PAT_AUTHOR|$PAT_SEE_ALSO) /$1\n\n$2 /og;
 # character.
 s/^Copyright +(?:\xa9|\([Cc]\))/Copyright \\(co/mg;
 
+my $require_mono = 0;
+my $compact_indented_tags = 0;
+my $blank_before_paragraph = 0;
 while (length)
 {
     # Convert some standard paragraph names.
     if (s/^($PAT_OPTIONS): *\n+//o)
     {
 	$sect = _('OPTIONS');
+	$blank_before_paragraph = 0;
 	next;
     }
     if (s/^($PAT_ENVIRONMENT): *\n+//o)
     {
 	$sect = _('ENVIRONMENT');
+	$blank_before_paragraph = 0;
 	next;
     }
     if (s/^($PAT_FILES): *\n+//o)
     {
 	$sect = _('FILES');
+	$blank_before_paragraph = 0;
 	next;
     }
     elsif (s/^($PAT_EXAMPLES): *\n+//o)
     {
 	$sect = _('EXAMPLES');
+	$blank_before_paragraph = 0;
 	next;
     }
 
@@ -470,6 +490,7 @@ while (length)
 	$sect = uc $1;
 	$sect =~ tr/*/ /;  # also accept *Section*Name*
 	push @sections, $sect;
+	$blank_before_paragraph = 0;
 	next;
     }
 
@@ -498,15 +519,16 @@ while (length)
     }
 
     # Examples, indicated by an indented leading $, % or > are
-    # rendered in a constant width font.
+    # rendered in a monospace font when using groff in troff mode.
     if (/^( +)([\$\%>] )\S/)
     {
-	my $indent = $1;
+	my $spaces = $1;
 	my $prefix = $2;
 	my $break = '.IP';
-	while (s/^$indent\Q$prefix\E(\S.*)\n*//)
+	while (s/^$spaces\Q$prefix\E(\S.*)\n*//)
 	{
-	    $include{$sect} .= "$break\n\\f(CW$prefix$1\\fR\n";
+	    $include{$sect} .= "$break\n\\*[mono]$prefix$1\\*[/mono]\n";
+	    $require_mono++;
 	    $break = '.br';
 	}
 
@@ -524,17 +546,19 @@ while (length)
 
     my $indent = 0;
     my $content = '';
+    my $tag_line_indent;
+    my $tag_line_width;
 
     # Option with description.
-    if (s/^( {1,10}([+-]\S.*?))(?:(  +(?!-))|\n( {20,}))(\S.*)\n//)
+    if (s/^( {1,10}([+-]\S.*?))(?:(  +(?!-))|\n( {7,}))(\S.*)\n//)
     {
 	$matched .= $& if %append_match;
-	$indent = length ($4 || "$1$3");
+	$indent = set_indent visual_length ($4 || "$1$3");
 	$content = ".TP\n\x84$2\n\x84$5\n";
 	unless ($4)
 	{
 	    # Indent may be different on second line.
-	    $indent = length $& if /^ {20,}/;
+	    $indent = set_indent visual_length $& if /^ {20,}/;
 	}
     }
 
@@ -543,22 +567,25 @@ while (length)
     {
 	$matched .= $& if %append_match;
 	$content = ".HP\n\x84$1\n";
-	$indent = 80; # not continued
+	$indent = 80;  # not continued
     }
 
     # Indented paragraph with tag.
-    elsif (s/^( +(\S.*?)  +)(\S.*)\n//)
+    elsif (s/^(( +)(\S.*?)  +)(\S.*)\n//)
     {
 	$matched .= $& if %append_match;
-	$indent = length $1;
-	$content = ".TP\n\x84$2\n\x84$3\n";
+	$tag_line_width = (visual_length $1) - (visual_length $2);
+	$tag_line_width = 1 if $tag_line_width < 1;
+	$indent = set_indent $tag_line_width;
+	$content = ".TP\n\x84$3\n\x84$4\n";
+	$tag_line_indent = $2;
     }
 
     # Indented paragraph.
     elsif (s/^( +)(\S.*)\n//)
     {
 	$matched .= $& if %append_match;
-	$indent = length $1;
+	$indent = set_indent visual_length $1;
 	$content = ".IP\n\x84$2\n";
     }
 
@@ -578,8 +605,42 @@ while (length)
 	$content .= "\x84$1\n";
     }
 
-    # Move to next paragraph.
-    s/^\n+//;
+    # Consecutive generic tagged rows are dense tables.  Keep .TP's
+    # hanging indentation, but suppress inter-paragraph distance.
+    my $is_indented_tag = $content =~ /^\.TP\n/ && defined $tag_line_indent;
+    my $next_indented_tag = $is_indented_tag
+	&& indented_tag_line ($_, $tag_line_indent);
+    my $compact_this_tag = $is_indented_tag
+	&& ($compact_indented_tags || $next_indented_tag);
+    my $preserve_blank_after = 0;
+
+    if ($compact_this_tag)
+    {
+	$content =~ s/^\.TP\n/.TP $tag_line_width\n/;
+	unless ($compact_indented_tags)
+	{
+	    $content = ".PD 0\n$content";
+	    $content = ".PP\n$content" if $blank_before_paragraph;
+	    $compact_indented_tags = 1;
+	}
+	unless ($next_indented_tag)
+	{
+	    $content .= ".PD\n";
+	    (my $next_paragraph = $_) =~ s/^\n+//;
+	    $preserve_blank_after = /^\n/
+		&& generic_indented_tag_line $next_paragraph;
+	    $content .= ".PP\n" if $preserve_blank_after;
+	    $compact_indented_tags = 0;
+	}
+    }
+    elsif ($compact_indented_tags)
+    {
+	$content = ".PD\n$content";
+	$compact_indented_tags = 0;
+    }
+
+    $blank_before_paragraph = s/^\n+//;
+    $blank_before_paragraph = 0 if $preserve_blank_after;
 
     for ($content)
     {
@@ -592,9 +653,14 @@ while (length)
 	unless ($sect eq _('EXAMPLES'))
 	{
 	    # Convert options.
-	    s/(^|[ (])(-[][\w=-]+)/$1 . convert_option $2/mge;
+	    s/
+		(
+		  ^|[ (])(-[][\w-]+             # Base -o or --option match
+		  (?:=\S*[^\s,.])?              # =parameter portion match
+		)
+	    /$1 . convert_option $2/xmge;
 
-	    # Italicise filenames: /a/b, $VAR/c/d, ~/e/f
+	    # Italicize filenames: /a/b, $VAR/c/d, ~/e/f
 	    s!
 		(^|[ (])			# space/punctuation before
 		(
@@ -679,7 +745,8 @@ EOT
 # Append additional text.
 while (my ($sect, $text) = each %append)
 {
-    $include{$sect} .= $append{$sect};
+    $require_mono++ if $text =~ /\\\*\[mono\]/;
+    $include{$sect} .= $text;
 }
 
 # Replace sections.
@@ -689,9 +756,18 @@ while (my ($sect, $text) = each %replace)
 }
 
 # Output header.
-print <<EOT;
+print enc <<EOT;
 .\\" DO NOT MODIFY THIS FILE!  It was generated by $this_program $this_version.
 .TH $PROGRAM "$section" "$date" "$source" "$manual"
+EOT
+
+# If monospace was used emit macros for groff.
+print enc <<'EOT' if $require_mono;
+.\" Define monospaced roman font for groff in troff mode.
+.if t .if \n(.g \{\
+. ds mono \f(CR
+. ds /mono \fP
+.\}
 EOT
 
 # Section ordering.
@@ -700,6 +776,19 @@ my @pre = (_('NAME'), _('SYNOPSIS'), _('DESCRIPTION'), _('OPTIONS'),
 my @post = (_('ENVIRONMENT'), _('FILES'), _('AUTHOR'),
     _('REPORTING BUGS'), _('COPYRIGHT'), _('SEE ALSO'));
 my %filter = map { $_ => 1 } @pre, @post;
+
+# Global storage for OSC 8 hyperlink URLs
+our @hyperlink_urls;
+
+# Helper to convert hyperlink markers to roff \X escapes
+sub convert_hyperlink {
+    my ($dashes, $idx, $text) = @_;
+    my $url = $hyperlink_urls[$idx];
+    my $full = $dashes . $text;
+    $full =~ s/\\f[BIRP]//g;
+    $full = "\\fB$full\\fP" if $opt_bold_refs;
+    return "\\X'tty: link $url'$full\\X'tty: link'";
+}
 
 # Output content.
 my %done;
@@ -714,6 +803,13 @@ for my $sect (@pre, (grep !$filter{$_}, @sections), @post)
 
 	for ($include{$sect})
 	{
+            # Add bold style around referenced pages.
+            if ($opt_bold_refs)
+            {
+                # This will ignore entries already marked up (with \)
+                s/(^|\s|,)([\[\w\x83]+)\(([1-9][[:lower:]]?)\)/$1\\fB$2\\fP($3)/g;
+            }
+
 	    # Replace leading dot, apostrophe, backslash and hyphen
 	    # tokens.
 	    s/\x80/\\&./g;
@@ -721,8 +817,12 @@ for my $sect (@pre, (grep !$filter{$_}, @sections), @post)
 	    s/\x82/\\e/g;
 	    s/\x83/\\-/g;
 
-	    # Convert some latin1 chars to troff equivalents
-	    s/\xa0/\\ /g; # non-breaking space
+	    # Convert hyperlink markers to roff \X escape sequences
+	    s{((?:\+|(?:(?:\\f.)?\\-(?:\\-)?(?:\\f.)?))?)\x01(\d+)\x02(.*?)\x03}
+	     {convert_hyperlink($1, $2, $3)}gse;
+
+	    # Convert some latin1 chars to troff equivalents.
+	    s/\xa0/\\ /g;  # non-breaking space
 
 	    print enc $_;
 	}
@@ -763,17 +863,36 @@ sub get_option_value
 	kark $err, $this_program, $opt, $prog, $extra;
     }
 
+    # Strip ANSI SGR formatting codes (colors, bold, etc.)
+    $value =~ s/\x1b\[[0-9;]*m//g;
+
+    # Convert OSC 8 hyperlinks to markers placed after any leading dashes/plus
+    # This preserves help2man's option detection (which looks for /^  +[-+]/)
+    # Support both BEL (\x07) and ST (\x1b\) terminators
+    $value =~ s/
+        \x1b\]8;;([^\x07\x1b]*)(?:\x07|\x1b\\)  # opening OSC 8 with URL
+        (\+|--?)?(.*?)                          # optional +, -, or -- and link text
+        \x1b\]8;;(?:\x07|\x1b\\)                # closing OSC 8
+    /{
+        my $idx = scalar @hyperlink_urls;
+        push @hyperlink_urls, $1;
+        my $dashes = $2 || "";
+        "$dashes\x01$idx\x02$3\x03";
+    }/gsex;
+
     $value;
 }
 
 # Convert option dashes to \- to stop nroff from hyphenating 'em, and
-# embolden.  Option arguments get italicised.
+# embolden.  Option arguments get italicized.
 sub convert_option
 {
     local $_ = '\fB' . shift;
 
     s/-/\x83/g;
-    unless (s/\[=(.*)\]$/\\fR[=\\fI$1\\fR]/)
+    unless (
+        s/\x83(\w)\[(.*)\]/\x83$1\\fR[\\fI$2\\fR]/ or  # short form [optional]
+        s/\[=(.*)\]$/\\fR[=\\fI$1\\fR]/)               # long form [optional]
     {
 	s/=(.)/\\fR=\\fI$1/;
 	s/ (.)/ \\fI$1/;
@@ -790,4 +909,47 @@ sub fix_italic_spacing
     local $_ = shift;
     s!\\fI(.*?)\\f([BRP])!\\fI\\,$1\\/\\f$2!g;
     return $_;
+}
+
+# Return true if text starts with a generic indented tag row using
+# the same leading indentation.  Option rows are handled separately.
+sub generic_indented_tag_line
+{
+    my $text = shift;
+
+    return 0 unless $text =~ /^ +\S.*?  +\S.*\n/;
+    return 0 if $text
+	=~ /^( {1,10}[+-]\S.*?)(?:(  +(?!-))|\n( {7,}))(\S.*)\n/;
+    return 0 if $text =~ /^ {1,10}[+-]\S.*\n/;
+    return 1;
+}
+
+sub indented_tag_line
+{
+    my ($text, $leading_indent) = @_;
+
+    return $text =~ /^\Q$leading_indent\E/
+	&& generic_indented_tag_line $text;
+}
+
+# Return indent to use: either the value passed in, or $v,$v+4 if
+# loose index matching is used.  The resulting string is used in a
+# regex as " {$indent}", so will match either the exact number of
+# spaces passed in, or up to four more.  See the --loose-indent
+# option.
+sub set_indent
+{
+    my $i = $_[0];
+    $i .= ',' . ($_[0] + 4) if $loose_indent;
+    return $i;
+}
+
+# Return visual length of a string, ignoring hyperlink markers.
+# Markers are \x01<digits>\x02 (opening) and \x03 (closing).
+sub visual_length
+{
+    local $_ = shift;
+    s/\x01\d+\x02//g;
+    s/\x03//g;
+    return length;
 }

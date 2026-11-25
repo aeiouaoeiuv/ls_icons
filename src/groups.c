@@ -1,5 +1,5 @@
 /* groups -- print the groups a user is in
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -25,7 +25,6 @@
 #include <getopt.h>
 
 #include "system.h"
-#include "die.h"
 #include "group-list.h"
 #include "quote.h"
 
@@ -57,8 +56,8 @@ Print group memberships for each USERNAME or, if no USERNAME is specified, for\
 \n\
 the current process (which may differ if the groups database has changed).\n"),
              stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -67,11 +66,6 @@ the current process (which may differ if the groups database has changed).\n"),
 int
 main (int argc, char **argv)
 {
-  int optc;
-  bool ok = true;
-  gid_t rgid, egid;
-  uid_t ruid;
-
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   setlocale (LC_ALL, "");
@@ -81,8 +75,8 @@ main (int argc, char **argv)
   atexit (close_stdout);
 
   /* Processing the arguments this way makes groups.c behave differently to
-   * groups.sh if one of the arguments is "--".
-   */
+     groups.sh if one of the arguments is "--".  */
+  int optc;
   while ((optc = getopt_long (argc, argv, "", longopts, NULL)) != -1)
     {
       switch (optc)
@@ -94,6 +88,7 @@ main (int argc, char **argv)
         }
     }
 
+  bool ok = true;
   if (optind == argc)
     {
       /* No arguments.  Divulge the details of the current process. */
@@ -101,19 +96,19 @@ main (int argc, char **argv)
       gid_t NO_GID = -1;
 
       errno = 0;
-      ruid = getuid ();
+      uid_t ruid = getuid ();
       if (ruid == NO_UID && errno)
-        die (EXIT_FAILURE, errno, _("cannot get real UID"));
+        error (EXIT_FAILURE, errno, _("cannot get real UID"));
 
       errno = 0;
-      egid = getegid ();
+      gid_t egid = getegid ();
       if (egid == NO_GID && errno)
-        die (EXIT_FAILURE, errno, _("cannot get effective GID"));
+        error (EXIT_FAILURE, errno, _("cannot get effective GID"));
 
       errno = 0;
-      rgid = getgid ();
+      gid_t rgid = getgid ();
       if (rgid == NO_GID && errno)
-        die (EXIT_FAILURE, errno, _("cannot get real GID"));
+        error (EXIT_FAILURE, errno, _("cannot get real GID"));
 
       if (!print_group_list (NULL, ruid, rgid, egid, true, ' '))
         ok = false;
@@ -131,13 +126,17 @@ main (int argc, char **argv)
               ok = false;
               continue;
             }
-          ruid = pwd->pw_uid;
-          rgid = egid = pwd->pw_gid;
+          uid_t ruid = pwd->pw_uid;
+          gid_t rgid = pwd->pw_gid;
+          gid_t egid = rgid;
 
           printf ("%s : ", argv[optind]);
           if (!print_group_list (argv[optind], ruid, rgid, egid, true, ' '))
             ok = false;
           putchar ('\n');
+
+          if (ferror (stdout))
+            write_error ();
         }
     }
 

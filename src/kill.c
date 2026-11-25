@@ -1,5 +1,5 @@
 /* kill -- send a signal to a process
-   Copyright (C) 2002-2021 Free Software Foundation, Inc.
+   Copyright (C) 2002-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@
 #include <signal.h>
 
 #include "system.h"
-#include "error.h"
+#include "c-ctype.h"
 #include "sig2str.h"
 #include "operand2sig.h"
 #include "quote.h"
@@ -32,24 +32,6 @@
 #define PROGRAM_NAME "kill"
 
 #define AUTHORS proper_name ("Paul Eggert")
-
-#if ! (HAVE_DECL_STRSIGNAL || defined strsignal)
-# if ! (HAVE_DECL_SYS_SIGLIST || defined sys_siglist)
-#  if HAVE_DECL__SYS_SIGLIST || defined _sys_siglist
-#   define sys_siglist _sys_siglist
-#  elif HAVE_DECL___SYS_SIGLIST || defined __sys_siglist
-#   define sys_siglist __sys_siglist
-#  endif
-# endif
-# if HAVE_DECL_SYS_SIGLIST || defined sys_siglist
-#  define strsignal(signum) (0 <= (signum) && (signum) <= SIGNUM_BOUND \
-                             ? sys_siglist[signum] \
-                             : 0)
-# endif
-# ifndef strsignal
-#  define strsignal(signum) 0
-# endif
-#endif
 
 static char const short_options[] =
   "0::1::2::3::4::5::6::7::8::9::"
@@ -86,14 +68,20 @@ Send signals to processes, or list signals.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
+      oputs (_("\
   -s, --signal=SIGNAL, -SIGNAL\n\
-                   specify the name or number of the signal to be sent\n\
-  -l, --list       list signal names, or convert signal names to/from numbers\n\
-  -t, --table      print a table of signal information\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+         specify the name or number of the signal to be sent\n\
+"));
+      oputs (_("\
+  -l, --list\n\
+         list signal names, or convert signal names to/from numbers\n\
+"));
+      oputs (_("\
+  -t, --table\n\
+         print a table of signal information\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\n\
 SIGNAL may be a signal name like 'HUP', or a signal number like '1',\n\
 or the exit status of a process terminated by a signal.\n\
@@ -125,24 +113,23 @@ print_table_row (int num_width, int signum,
 static int
 list_signals (bool table, char *const *argv)
 {
-  int signum;
   int status = EXIT_SUCCESS;
   char signame[SIG2STR_MAX];
 
   if (table)
     {
-      unsigned int name_width = 0;
+      int name_width = 0;
 
       /* Compute the maximum width of a signal number.  */
-      unsigned int num_width = 1;
-      for (signum = 1; signum <= SIGNUM_BOUND / 10; signum *= 10)
+      int num_width = 1;
+      for (int signum = 1; signum <= SIGNUM_BOUND / 10; signum *= 10)
         num_width++;
 
       /* Compute the maximum width of a signal name.  */
-      for (signum = 1; signum <= SIGNUM_BOUND; signum++)
+      for (int signum = 0; signum <= SIGNUM_BOUND; signum++)
         if (sig2str (signum, signame) == 0)
           {
-            size_t len = strlen (signame);
+            idx_t len = strlen (signame);
             if (name_width < len)
               name_width = len;
           }
@@ -150,14 +137,18 @@ list_signals (bool table, char *const *argv)
       if (argv)
         for (; *argv; argv++)
           {
-            signum = operand2sig (*argv, signame);
+            int signum = operand2sig (*argv);
             if (signum < 0)
               status = EXIT_FAILURE;
             else
-              print_table_row (num_width, signum, name_width, signame);
+              {
+                if (sig2str (signum, signame) != 0)
+                  snprintf (signame, sizeof signame, "SIG%d", signum);
+                print_table_row (num_width, signum, name_width, signame);
+              }
           }
       else
-        for (signum = 1; signum <= SIGNUM_BOUND; signum++)
+        for (int signum = 0; signum <= SIGNUM_BOUND; signum++)
           if (sig2str (signum, signame) == 0)
             print_table_row (num_width, signum, name_width, signame);
     }
@@ -166,19 +157,21 @@ list_signals (bool table, char *const *argv)
       if (argv)
         for (; *argv; argv++)
           {
-            signum = operand2sig (*argv, signame);
+            int signum = operand2sig (*argv);
             if (signum < 0)
               status = EXIT_FAILURE;
-            else
+            else if (c_isdigit (**argv))
               {
-                if (ISDIGIT (**argv))
+                if (sig2str (signum, signame) == 0)
                   puts (signame);
                 else
                   printf ("%d\n", signum);
               }
+            else
+              printf ("%d\n", signum);
           }
       else
-        for (signum = 1; signum <= SIGNUM_BOUND; signum++)
+        for (int signum = 0; signum <= SIGNUM_BOUND; signum++)
           if (sig2str (signum, signame) == 0)
             puts (signame);
     }
@@ -199,16 +192,20 @@ send_signals (int signum, char *const *argv)
     {
       char *endp;
       intmax_t n = (errno = 0, strtoimax (arg, &endp, 10));
-      pid_t pid = n;
+      pid_t pid;
 
-      if (errno == ERANGE || pid != n || arg == endp || *endp)
+      if (errno == ERANGE || ckd_add (&pid, n, 0)
+          || arg == endp || *endp)
         {
           error (0, 0, _("%s: invalid process id"), quote (arg));
           status = EXIT_FAILURE;
         }
       else if (kill (pid, signum) != 0)
         {
-          error (0, errno, "%s", quote (arg));
+          if (errno == EINVAL)
+            error (0, errno, "%d", signum);
+          else
+            error (0, errno, "%s", quote (arg));
           status = EXIT_FAILURE;
         }
     }
@@ -224,7 +221,6 @@ main (int argc, char **argv)
   bool list = false;
   bool table = false;
   int signum = -1;
-  char signame[SIG2STR_MAX];
 
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
@@ -269,7 +265,7 @@ main (int argc, char **argv)
             error (0, 0, _("%s: multiple signals specified"), quote (optarg));
             usage (EXIT_FAILURE);
           }
-        signum = operand2sig (optarg, signame);
+        signum = operand2sig (optarg);
         if (signum < 0)
           usage (EXIT_FAILURE);
         break;

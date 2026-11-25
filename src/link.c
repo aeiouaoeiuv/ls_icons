@@ -1,5 +1,5 @@
 /* link utility for GNU.
-   Copyright (C) 2001-2021 Free Software Foundation, Inc.
+   Copyright (C) 2001-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -25,8 +25,6 @@
 #include <sys/types.h>
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "long-options.h"
 #include "quote.h"
 
@@ -48,8 +46,8 @@ Usage: %s FILE1 FILE2\n\
       fputs (_("Call the link function to create a link named FILE2\
  to an existing FILE1.\n\n"),
              stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -86,8 +84,8 @@ main (int argc, char **argv)
     }
 
   if (link (argv[optind], argv[optind + 1]) != 0)
-    die (EXIT_FAILURE, errno, _("cannot create link %s to %s"),
-         quoteaf_n (0, argv[optind + 1]), quoteaf_n (1, argv[optind]));
+    error (EXIT_FAILURE, errno, _("cannot create link %s to %s"),
+           quoteaf_n (0, argv[optind + 1]), quoteaf_n (1, argv[optind]));
 
   return EXIT_SUCCESS;
 }

@@ -1,5 +1,5 @@
 /* mkfifo -- make fifo's (named pipes)
-   Copyright (C) 1990-2021 Free Software Foundation, Inc.
+   Copyright (C) 1990-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,8 +23,7 @@
 #include <selinux/label.h>
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
+#include "fcntl--.h"
 #include "modechange.h"
 #include "quote.h"
 #include "selinux.h"
@@ -58,16 +57,21 @@ Create named pipes (FIFOs) with the given NAMEs.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-  -m, --mode=MODE    set file permission bits to MODE, not a=rw - umask\n\
-"), stdout);
-      fputs (_("\
-  -Z                   set the SELinux security context to default type\n\
-      --context[=CTX]  like -Z, or if CTX is specified then set the SELinux\n\
-                         or SMACK security context to CTX\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -m, --mode=MODE\n\
+         set file permission bits to MODE, not a=rw - umask\n\
+"));
+      oputs (_("\
+  -Z\n\
+         set the SELinux security context to default type\n\
+"));
+      oputs (_("\
+      --context[=CTX]\n\
+         like -Z, or if CTX is specified then set the\n\
+         SELinux or SMACK security context to CTX\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -76,10 +80,7 @@ Create named pipes (FIFOs) with the given NAMEs.\n\
 int
 main (int argc, char **argv)
 {
-  mode_t newmode;
   char const *specified_mode = NULL;
-  int exit_status = EXIT_SUCCESS;
-  int optc;
   char const *scontext = NULL;
   struct selabel_handle *set_security_context = NULL;
 
@@ -91,6 +92,7 @@ main (int argc, char **argv)
 
   atexit (close_stdout);
 
+  int optc;
   while ((optc = getopt_long (argc, argv, "m:Z", longopts, NULL)) != -1)
     {
       switch (optc)
@@ -145,42 +147,78 @@ main (int argc, char **argv)
         ret = setfscreatecon (scontext);
 
       if (ret < 0)
-        die (EXIT_FAILURE, errno,
-             _("failed to set default file creation context to %s"),
-             quote (scontext));
+        error (EXIT_FAILURE, errno,
+               _("failed to set default file creation context to %s"),
+               quote (scontext));
     }
 
-  newmode = MODE_RW_UGO;
+  mode_t newmode = MODE_RW_UGO;
   if (specified_mode)
     {
-      mode_t umask_value;
       struct mode_change *change = mode_compile (specified_mode);
       if (!change)
-        die (EXIT_FAILURE, 0, _("invalid mode"));
-      umask_value = umask (0);
+        error (EXIT_FAILURE, 0, _("invalid mode"));
+      mode_t umask_value = umask (0);
       umask (umask_value);
       newmode = mode_adjust (newmode, false, umask_value, change, NULL);
       free (change);
       if (newmode & ~S_IRWXUGO)
-        die (EXIT_FAILURE, 0,
-             _("mode must specify only file permission bits"));
+        error (EXIT_FAILURE, 0,
+               _("mode must specify only file permission bits"));
     }
 
+  int exit_status = EXIT_SUCCESS;
   for (; optind < argc; ++optind)
     {
+      char const *const name = argv[optind];
+
       if (set_security_context)
-        defaultcon (set_security_context, argv[optind], S_IFIFO);
-      if (mkfifo (argv[optind], newmode) != 0)
+        defaultcon (set_security_context, name, S_IFIFO);
+
+      int dirfd = AT_FDCWD;
+      char const *relname = name;
+      char const *base;
+
+      /* When a mode is specified, open a file descriptor to the parent
+         and create the FIFO relative to that.  This allows us to call
+         lchmodat instead of lchmod, which would follow leading path
+         components in NAME.  The lchmodat call is necessary to set
+         the mode in the presence of default ACLs, where we may have
+         mode different than the one the user specified without it.  */
+      if (specified_mode && (base = last_component (name)) != name && *base)
         {
-          error (0, errno, _("cannot create fifo %s"), quoteaf (argv[optind]));
+          char *dir = dir_name (name);
+
+          dirfd = open (dir, O_PATHSEARCH | O_DIRECTORY);
+          free (dir);
+
+          /* We lie about the error here, since the reason for opening the
+             parent is not intuitive, and a mkfifo(3) call would most likely
+             fail for the same reason.  */
+          if (dirfd < 0)
+            {
+              error (0, errno, _("cannot create fifo %s"), quoteaf (name));
+              exit_status = EXIT_FAILURE;
+              continue;
+            }
+
+          relname = base;
+        }
+
+      if (mkfifoat (dirfd, relname, newmode) < 0)
+        {
+          error (0, errno, _("cannot create fifo %s"), quoteaf (name));
           exit_status = EXIT_FAILURE;
         }
-      else if (specified_mode && lchmod (argv[optind], newmode) != 0)
+      else if (specified_mode && lchmodat (dirfd, relname, newmode) < 0)
         {
           error (0, errno, _("cannot set permissions of %s"),
-                 quoteaf (argv[optind]));
+                 quoteaf (name));
           exit_status = EXIT_FAILURE;
         }
+
+      if (dirfd != AT_FDCWD)
+        close (dirfd);
     }
 
   return exit_status;

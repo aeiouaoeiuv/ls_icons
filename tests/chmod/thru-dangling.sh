@@ -1,7 +1,7 @@
 #!/bin/sh
 # Test for proper error and exit code of chmod on a dangling symlink.
 
-# Copyright (C) 2007-2021 Free Software Foundation, Inc.
+# Copyright (C) 2007-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -27,5 +27,10 @@ chmod 644 dangle 2> out && fail=1
 
 echo "chmod: cannot operate on dangling symlink 'dangle'" > exp
 compare exp out || fail=1
+
+# A symlink identified by readdir must still get the dereference diagnostic.
+mkdir dir && mv dangle dir/ || framework_failure_
+returns_ 1 chmod -RH --dereference u+w dir 2>out || fail=1
+grep -F "cannot dereference 'dir/dangle'" out || fail=1
 
 Exit $fail

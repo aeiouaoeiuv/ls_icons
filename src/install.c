@@ -1,5 +1,5 @@
 /* install - copy files and set attributes
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -24,14 +24,13 @@
 #include <pwd.h>
 #include <grp.h>
 #include <selinux/label.h>
+#include <spawn.h>
 #include <sys/wait.h>
 
 #include "system.h"
 #include "backupfile.h"
-#include "error.h"
 #include "cp-hash.h"
 #include "copy.h"
-#include "die.h"
 #include "filenamecat.h"
 #include "full-read.h"
 #include "mkancesdirs.h"
@@ -41,7 +40,9 @@
 #include "quote.h"
 #include "savewd.h"
 #include "selinux.h"
+#include "selinux-at.h"
 #include "stat-time.h"
+#include "targetdir.h"
 #include "utimens.h"
 #include "xstrtol.h"
 
@@ -59,10 +60,6 @@ static bool use_default_selinux_context = true;
 
 #if ! HAVE_ENDPWENT
 # define endpwent() ((void) 0)
-#endif
-
-#if ! HAVE_LCHOWN
-# define lchown(name, uid, gid) chown (name, uid, gid)
 #endif
 
 /* The user name that will own the files, or NULL to make the owner
@@ -106,11 +103,15 @@ static bool dir_arg;
 /* Program used to strip binaries, "strip" is default */
 static char const *strip_program = "strip";
 
+/* The umask specified the user before we set it to zero.  */
+static mode_t initial_umask;
+
 /* For long options that have no equivalent short option, use a
    non-character as a pseudo short option, starting with CHAR_MAX + 1.  */
 enum
 {
-  PRESERVE_CONTEXT_OPTION = CHAR_MAX + 1,
+  DEBUG_OPTION = CHAR_MAX + 1,
+  PRESERVE_CONTEXT_OPTION,
   STRIP_PROGRAM_OPTION
 };
 
@@ -119,6 +120,7 @@ static struct option const long_options[] =
   {"backup", optional_argument, NULL, 'b'},
   {"compare", no_argument, NULL, 'C'},
   {GETOPT_SELINUX_CONTEXT_OPTION_DECL},
+  {"debug", no_argument, NULL, DEBUG_OPTION},
   {"directory", no_argument, NULL, 'd'},
   {"group", required_argument, NULL, 'g'},
   {"mode", required_argument, NULL, 'm'},
@@ -145,12 +147,12 @@ have_same_content (int a_fd, int b_fd)
   static char a_buff[CMP_BLOCK_SIZE];
   static char b_buff[CMP_BLOCK_SIZE];
 
-  size_t size;
+  idx_t size;
   while (0 < (size = full_read (a_fd, a_buff, sizeof a_buff))) {
     if (size != full_read (b_fd, b_buff, sizeof b_buff))
       return false;
 
-    if (memcmp (a_buff, b_buff, size) != 0)
+    if (!memeq (a_buff, b_buff, size))
       return false;
   }
 
@@ -165,23 +167,22 @@ extra_mode (mode_t input)
   return !! (input & ~ mask);
 }
 
-/* Return true if copy of file SRC_NAME to file DEST_NAME is necessary. */
+/* Return true if a copy of file SRC_NAME to file DEST_RELNAME, relative
+   to DEST_DIRFD, is necessary.  */
 static bool
-need_copy (char const *src_name, char const *dest_name,
+need_copy (char const *src_name, int const dest_dirfd, char const *dest_relname,
            const struct cp_options *x)
 {
-  struct stat src_sb, dest_sb;
-  int src_fd, dest_fd;
-  bool content_match;
-
   if (extra_mode (mode))
     return true;
 
   /* compare files using stat */
-  if (lstat (src_name, &src_sb) != 0)
+  struct stat src_sb;
+  if (stat (src_name, &src_sb) != 0)
     return true;
 
-  if (lstat (dest_name, &dest_sb) != 0)
+  struct stat dest_sb;
+  if (fstatat (dest_dirfd, dest_relname, &dest_sb, AT_SYMLINK_NOFOLLOW) != 0)
     return true;
 
   if (!S_ISREG (src_sb.st_mode) || !S_ISREG (dest_sb.st_mode)
@@ -215,40 +216,38 @@ need_copy (char const *src_name, char const *dest_name,
   /* compare SELinux context if preserving */
   if (selinux_enabled && x->preserve_security_context)
     {
-      char *file_scontext = NULL;
-      char *to_scontext = NULL;
-      bool scontext_match;
-
-      if (getfilecon (src_name, &file_scontext) == -1)
+      char *file_scontext_raw = NULL;
+      if (getfilecon_raw (src_name, &file_scontext_raw) == -1)
         return true;
 
-      if (getfilecon (dest_name, &to_scontext) == -1)
+      char *to_scontext_raw = NULL;
+      if (lgetfileconat_raw (dest_dirfd, dest_relname, &to_scontext_raw) == -1)
         {
-          freecon (file_scontext);
+          freecon (file_scontext_raw);
           return true;
         }
 
-      scontext_match = STREQ (file_scontext, to_scontext);
+      bool scontext_match = streq (file_scontext_raw, to_scontext_raw);
 
-      freecon (file_scontext);
-      freecon (to_scontext);
+      freecon (file_scontext_raw);
+      freecon (to_scontext_raw);
       if (!scontext_match)
         return true;
     }
 
   /* compare files content */
-  src_fd = open (src_name, O_RDONLY | O_BINARY);
+  int src_fd = open (src_name, O_RDONLY | O_BINARY);
   if (src_fd < 0)
     return true;
 
-  dest_fd = open (dest_name, O_RDONLY | O_BINARY);
+  int dest_fd = openat (dest_dirfd, dest_relname, O_RDONLY | O_BINARY);
   if (dest_fd < 0)
     {
       close (src_fd);
       return true;
     }
 
-  content_match = have_same_content (src_fd, dest_fd);
+  bool content_match = have_same_content (src_fd, dest_fd);
 
   close (src_fd);
   close (dest_fd);
@@ -288,13 +287,19 @@ cp_option_init (struct cp_options *x)
      would fail.  */
   x->set_mode = true;
   x->mode = S_IRUSR | S_IWUSR;
+
+  /* May be overridden by --owner.  */
+  x->owner = (uid_t) -1;
+  /* May be overridden by --group.  */
+  x->group = (gid_t) -1;
+
   x->stdin_tty = false;
 
   x->open_dangling_dest_symlink = false;
-  x->update = false;
+  x->update = UPDATE_ALL;
   x->require_preserve_context = false;  /* Not used by install currently.  */
   x->preserve_security_context = false; /* Whether to copy context from src.  */
-  x->set_security_context = NULL;     /* Whether to set sys default context.  */
+  x->set_security_context = NULL; /* Whether to set sys default context.  */
   x->preserve_xattr = false;
   x->verbose = false;
   x->dest_info = NULL;
@@ -319,60 +324,39 @@ get_labeling_handle (void)
 /* Modify file context to match the specified policy.
    If an error occurs the file will remain with the default directory
    context.  Note this sets the context to that returned by selabel_lookup
-   and thus discards MLS levels and user identity of the FILE.  */
+   and thus discards MLS levels and user identity of the NAME.  */
 static void
-setdefaultfilecon (char const *file)
+setdefaultfilecon (char const *name, int const dirfd, char const *relname)
 {
-  struct stat st;
-  char *scontext = NULL;
-
   if (selinux_enabled != 1)
     {
       /* Indicate no context found. */
       return;
     }
-  if (lstat (file, &st) != 0)
+
+  struct stat st;
+  if (fstatat (dirfd, relname, &st, AT_SYMLINK_NOFOLLOW) < 0)
     return;
 
   struct selabel_handle *hnd = get_labeling_handle ();
   if (!hnd)
     return;
-  if (selabel_lookup (hnd, &scontext, file, st.st_mode) != 0)
+
+  char *scontext_raw = NULL;
+  if (selabel_lookup_raw (hnd, &scontext_raw, name, st.st_mode) != 0)
     {
       if (errno != ENOENT && ! ignorable_ctx_err (errno))
         error (0, errno, _("warning: %s: context lookup failed"),
-               quotef (file));
+               quotef (name));
       return;
     }
 
-  if (lsetfilecon (file, scontext) < 0 && errno != ENOTSUP)
+  if (lsetfileconat_raw (dirfd, relname, scontext_raw) < 0 && errno != ENOTSUP)
     error (0, errno,
            _("warning: %s: failed to change context to %s"),
-           quotef_n (0, file), quote_n (1, scontext));
+           quotef_n (0, name), quote_n (1, scontext_raw));
 
-  freecon (scontext);
-}
-
-/* FILE is the last operand of this command.  Return true if FILE is a
-   directory.  But report an error there is a problem accessing FILE,
-   or if FILE does not exist but would have to refer to an existing
-   directory if it referred to anything at all.  */
-
-static bool
-target_directory_operand (char const *file)
-{
-  char const *b = last_component (file);
-  size_t blen = strlen (b);
-  bool looks_like_a_dir = (blen == 0 || ISSLASH (b[blen - 1]));
-  struct stat st;
-  int err = (stat (file, &st) == 0 ? 0 : errno);
-  bool is_a_dir = !err && S_ISDIR (st.st_mode);
-  if (err && err != ENOENT)
-    die (EXIT_FAILURE, err, _("failed to access %s"), quoteaf (file));
-  if (is_a_dir < looks_like_a_dir)
-    die (EXIT_FAILURE, err, _("target %s is not a directory"),
-         quoteaf (file));
-  return is_a_dir;
+  freecon (scontext_raw);
 }
 
 /* Report that directory DIR was made, if OPTIONS requests this.  */
@@ -431,16 +415,18 @@ process_dir (char *dir, struct savewd *wd, void *options)
   return ret;
 }
 
-/* Copy file FROM onto file TO, creating TO if necessary.
-   Return true if successful.  */
+enum copy_status { COPY_FAILED, COPY_OK, COPY_SKIPPED };
 
-static bool
-copy_file (char const *from, char const *to, const struct cp_options *x)
+/* Copy file FROM onto file TO aka TO_DIRFD+TO_RELNAME, creating TO if
+   necessary.  Return COPY_OK if successful or COPY_SKIPPED if the copy
+   was skipped.  */
+
+static enum copy_status
+copy_file (char const *from, char const *to,
+           int to_dirfd, char const *to_relname, const struct cp_options *x)
 {
-  bool copy_into_self;
-
-  if (copy_only_if_needed && !need_copy (from, to, x))
-    return true;
+  if (copy_only_if_needed && !need_copy (from, to_dirfd, to_relname, x))
+    return COPY_SKIPPED;
 
   /* Allow installing from non-regular files like /dev/null.
      Charles Karney reported that some Sun version of install allows that
@@ -448,14 +434,16 @@ copy_file (char const *from, char const *to, const struct cp_options *x)
      However, since !x->recursive, the call to "copy" will fail if FROM
      is a directory.  */
 
-  return copy (from, to, false, x, &copy_into_self, NULL);
+  bool copy_into_self;
+  return (copy (from, to, to_dirfd, to_relname, 0, x, &copy_into_self, NULL)
+          ? COPY_OK : COPY_FAILED);
 }
 
-/* Set the attributes of file or directory NAME.
+/* Set the attributes of file or directory NAME aka DIRFD+RELNAME.
    Return true if successful.  */
 
 static bool
-change_attributes (char const *name)
+change_attributes (char const *name, int dirfd, char const *relname)
 {
   bool ok = false;
   /* chown must precede chmod because on some systems,
@@ -470,31 +458,35 @@ change_attributes (char const *name)
      If the file doesn't end up with the group they asked for, they'll
      want to know.  */
 
-  if (! (owner_id == (uid_t) -1 && group_id == (gid_t) -1)
-      && lchown (name, owner_id, group_id) != 0)
+  /* If we aren't using 'strip', then the copy function set the
+     ownership and permissions for us.  */
+  if (! strip_files)
+    ok = true;
+  else if (! (owner_id == (uid_t) -1 && group_id == (gid_t) -1)
+           && lchownat (dirfd, relname, owner_id, group_id) != 0)
     error (0, errno, _("cannot change ownership of %s"), quoteaf (name));
-  else if (chmod (name, mode) != 0)
+  else if (lchmodat (dirfd, relname, mode) != 0)
     error (0, errno, _("cannot change permissions of %s"), quoteaf (name));
   else
     ok = true;
 
   if (use_default_selinux_context)
-    setdefaultfilecon (name);
+    setdefaultfilecon (name, dirfd, relname);
 
   return ok;
 }
 
-/* Set the timestamps of file DEST to match those of SRC_SB.
+/* Set the timestamps of file DEST aka DIRFD+RELNAME to match those of SRC_SB.
    Return true if successful.  */
 
 static bool
-change_timestamps (struct stat const *src_sb, char const *dest)
+change_timestamps (struct stat const *src_sb, char const *dest,
+                   int dirfd, char const *relname)
 {
-  struct timespec timespec[2];
-  timespec[0] = get_stat_atime (src_sb);
-  timespec[1] = get_stat_mtime (src_sb);
+  struct timespec timespec[2] = { get_stat_atime (src_sb),
+                                  get_stat_mtime (src_sb) };
 
-  if (utimens (dest, timespec))
+  if (utimensat (dirfd, relname, timespec, AT_SYMLINK_NOFOLLOW) < 0)
     {
       error (0, errno, _("cannot set timestamps for %s"), quoteaf (dest));
       return false;
@@ -511,27 +503,64 @@ change_timestamps (struct stat const *src_sb, char const *dest)
 static bool
 strip (char const *name)
 {
-  int status;
-  bool ok = false;
-  pid_t pid = fork ();
+  posix_spawnattr_t attr;
+  posix_spawnattr_t *attrp = NULL;
 
-  switch (pid)
+  /* Try to use vfork for systems where it matters.  */
+  if (posix_spawnattr_init (&attr) == 0)
     {
-    case -1:
-      error (0, errno, _("fork system call failed"));
-      break;
-    case 0:			/* Child. */
-      execlp (strip_program, strip_program, name, NULL);
-      die (EXIT_FAILURE, errno, _("cannot run %s"), quoteaf (strip_program));
-    default:			/* Parent. */
+      if (posix_spawnattr_setflags (&attr, POSIX_SPAWN_USEVFORK) == 0)
+        attrp = &attr;
+      else
+        posix_spawnattr_destroy (&attr);
+    }
+
+  /* Construct the arguments to 'strip'.  */
+  char *concat_name = NULL;
+  char const *safe_name = name;
+  if (name && *name == '-')
+    safe_name = concat_name = file_name_concat (".", name, NULL);
+  char const *const argv[] = { strip_program, safe_name, NULL };
+
+  /* Reset the umask to the one specified by the user, since some
+     'strip' implementations create files that can be read and/or
+     written to by other users.  */
+  umask (initial_umask);
+
+  /* Run 'strip'.  */
+  pid_t pid;
+  int result = posix_spawnp (&pid, strip_program, NULL, attrp,
+                             (char * const *) argv, environ);
+
+  /* Restore the umask to zero now that the child process has
+     inherited the initial umask.  */
+  umask (0);
+
+  bool ok = false;
+  if (result != 0)
+    {
+      error (0, result,
+             streq (strip_program, "strip")
+               ? _("cannot run %s")
+               : _("cannot run strip program %s"),
+             quoteaf (strip_program));
+    }
+  else
+    {
+      /* Wait for 'strip' to complete, and emit a warning message on failure  */
+      int status;
       if (waitpid (pid, &status, 0) < 0)
         error (0, errno, _("waiting for strip"));
       else if (! WIFEXITED (status) || WEXITSTATUS (status))
         error (0, 0, _("strip process terminated abnormally"));
       else
-        ok = true;      /* strip succeeded */
-      break;
+        ok = true;
     }
+
+  free (concat_name);
+  if (attrp)
+    posix_spawnattr_destroy (attrp);
+
   return ok;
 }
 
@@ -540,20 +569,16 @@ strip (char const *name)
 static void
 get_ids (void)
 {
-  struct passwd *pw;
-  struct group *gr;
-
   if (owner_name)
     {
-      pw = getpwnam (owner_name);
+      struct passwd *pw = getpwnam (owner_name);
       if (pw == NULL)
         {
           uintmax_t tmp;
           if (xstrtoumax (owner_name, NULL, 0, &tmp, "") != LONGINT_OK
-              || UID_T_MAX < tmp)
-            die (EXIT_FAILURE, 0, _("invalid user %s"),
-                 quote (owner_name));
-          owner_id = tmp;
+              || ckd_add (&owner_id, tmp, 0))
+            error (EXIT_FAILURE, 0, _("invalid user %s"),
+                   quoteaf (owner_name));
         }
       else
         owner_id = pw->pw_uid;
@@ -564,15 +589,14 @@ get_ids (void)
 
   if (group_name)
     {
-      gr = getgrnam (group_name);
+      struct group *gr = getgrnam (group_name);
       if (gr == NULL)
         {
           uintmax_t tmp;
           if (xstrtoumax (group_name, NULL, 0, &tmp, "") != LONGINT_OK
-              || GID_T_MAX < tmp)
-            die (EXIT_FAILURE, 0, _("invalid group %s"),
-                 quote (group_name));
-          group_id = tmp;
+              || ckd_add (&group_id, tmp, 0))
+            error (EXIT_FAILURE, 0, _("invalid group %s"),
+                   quoteaf (group_name));
         }
       else
         group_id = gr->gr_gid;
@@ -610,55 +634,110 @@ In the 4th form, create all components of the given DIRECTORY(ies).\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-      --backup[=CONTROL]  make a backup of each existing destination file\n\
-  -b                  like --backup but does not accept an argument\n\
-  -c                  (ignored)\n\
-  -C, --compare       compare each pair of source and destination files, and\n\
-                        in some cases, do not modify the destination at all\n\
-  -d, --directory     treat all arguments as directory names; create all\n\
-                        components of the specified directories\n\
-"), stdout);
-      fputs (_("\
-  -D                  create all leading components of DEST except the last,\n\
-                        or all components of --target-directory,\n\
-                        then copy SOURCE to DEST\n\
-  -g, --group=GROUP   set group ownership, instead of process' current group\n\
-  -m, --mode=MODE     set permission mode (as in chmod), instead of rwxr-xr-x\n\
-  -o, --owner=OWNER   set ownership (super-user only)\n\
-"), stdout);
-      fputs (_("\
-  -p, --preserve-timestamps   apply access/modification times of SOURCE files\n\
-                        to corresponding destination files\n\
-  -s, --strip         strip symbol tables\n\
-      --strip-program=PROGRAM  program used to strip binaries\n\
-  -S, --suffix=SUFFIX  override the usual backup suffix\n\
-  -t, --target-directory=DIRECTORY  copy all SOURCE arguments into DIRECTORY\n\
-  -T, --no-target-directory  treat DEST as a normal file\n\
-  -v, --verbose       print the name of each directory as it is created\n\
-"), stdout);
-      fputs (_("\
-      --preserve-context  preserve SELinux security context\n\
-  -Z                      set SELinux security context of destination\n\
-                            file and each created directory to default type\n\
-      --context[=CTX]     like -Z, or if CTX is specified then set the\n\
-                            SELinux or SMACK security context to CTX\n\
-"), stdout);
+      oputs (_("\
+      --backup[=CONTROL]\n\
+         make a backup of each existing destination file\n\
+"));
+      oputs (_("\
+  -b\n\
+         like --backup but does not accept an argument\n\
+"));
+      oputs (_("\
+  -c\n\
+         (ignored)\n\
+"));
+      oputs (_("\
+  -C, --compare\n\
+         compare content of source and destination files,\n\
+         and if no change to content, ownership, and permissions,\n\
+         do not modify the destination at all\n\
+"));
+      oputs (_("\
+  -d, --directory\n\
+         treat all arguments as directory names;\n\
+         create all components of the specified directories\n\
+"));
+      oputs (_("\
+  -D\n\
+         create all leading components of DEST except the last,\n\
+         or all components of --target-directory,\n\
+         then copy SOURCE to DEST\n\
+"));
+      oputs (_("\
+      --debug\n\
+         explain how a file is copied.  Implies -v\n\
+"));
+      oputs (_("\
+  -g, --group=GROUP\n\
+         set group ownership, instead of process' current group\n\
+"));
+      oputs (_("\
+  -m, --mode=MODE\n\
+         set permission mode (as in chmod), instead of rwxr-xr-x\n\
+"));
+      oputs (_("\
+  -o, --owner=OWNER\n\
+         set ownership (super-user only)\n\
+"));
+      oputs (_("\
+  -p, --preserve-timestamps\n\
+         apply access/modification times of SOURCE files\n\
+         to corresponding destination files\n\
+"));
+      oputs (_("\
+  -s, --strip\n\
+         strip symbol tables\n\
+"));
+      oputs (_("\
+      --strip-program=PROGRAM\n\
+         program used to strip binaries\n\
+"));
+      oputs (_("\
+  -S, --suffix=SUFFIX\n\
+         override the usual backup suffix\n\
+"));
+      oputs (_("\
+  -t, --target-directory=DIRECTORY\n\
+         copy all SOURCE arguments into DIRECTORY\n\
+"));
+      oputs (_("\
+  -T, --no-target-directory\n\
+         treat DEST as a normal file\n\
+"));
+      oputs (_("\
+  -v, --verbose\n\
+         print the name of each created file or directory\n\
+"));
+      oputs (_("\
+      --preserve-context\n\
+         preserve SELinux security context\n\
+"));
+      oputs (_("\
+  -Z\n\
+         set SELinux security context of destination file\n\
+         and each created directory, to default type\n\
+"));
+      oputs (_("\
+      --context[=CTX]\n\
+         like -Z, or if CTX is specified then set the\n\
+         SELinux or SMACK security context to CTX\n\
+"));
 
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_backup_suffix_note ();
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
 }
 
-/* Copy file FROM onto file TO and give TO the appropriate
-   attributes.
+/* Copy file FROM onto file TO aka TO_DIRFD+TO_RELNAME and give TO the
+   appropriate attributes.  X gives the command options.
    Return true if successful.  */
 
 static bool
 install_file_in_file (char const *from, char const *to,
+                      int to_dirfd, char const *to_relname,
                       const struct cp_options *x)
 {
   struct stat from_sb;
@@ -667,19 +746,22 @@ install_file_in_file (char const *from, char const *to,
       error (0, errno, _("cannot stat %s"), quoteaf (from));
       return false;
     }
-  if (! copy_file (from, to, x))
+  enum copy_status copy_status = copy_file (from, to, to_dirfd, to_relname, x);
+  if (copy_status == COPY_FAILED)
     return false;
-  if (strip_files)
-    if (! strip (to))
-      {
-        if (unlink (to) != 0)  /* Cleanup.  */
-          die (EXIT_FAILURE, errno, _("cannot unlink %s"), quoteaf (to));
-        return false;
-      }
-  if (x->preserve_timestamps && (strip_files || ! S_ISREG (from_sb.st_mode))
-      && ! change_timestamps (&from_sb, to))
+  if (copy_status == COPY_OK && strip_files && ! strip (to))
+    {
+      if (unlinkat (to_dirfd, to_relname, 0) != 0)  /* Cleanup.  */
+        error (EXIT_FAILURE, errno, _("cannot unlink %s"), quoteaf (to));
+      return false;
+    }
+  if (x->preserve_timestamps && (copy_status == COPY_SKIPPED || strip_files
+                                 || ! S_ISREG (from_sb.st_mode))
+      && ! change_timestamps (&from_sb, to, to_dirfd, to_relname))
     return false;
-  return change_attributes (to);
+
+  return copy_status == COPY_SKIPPED
+         || change_attributes (to, to_dirfd, to_relname);
 }
 
 /* Create any missing parent directories of TO,
@@ -691,15 +773,15 @@ mkancesdirs_safe_wd (char const *from, char *to, struct cp_options *x,
                      bool save_always)
 {
   bool save_working_directory =
-    save_always
-    || ! (IS_ABSOLUTE_FILE_NAME (from) && IS_ABSOLUTE_FILE_NAME (to));
-  int status = EXIT_SUCCESS;
+    (save_always || strip_files /* strip may be, or access relative files.  */
+     || ! (IS_ABSOLUTE_FILE_NAME (from) && IS_ABSOLUTE_FILE_NAME (to)));
 
   struct savewd wd;
   savewd_init (&wd);
   if (! save_working_directory)
     savewd_finish (&wd);
 
+  int status = EXIT_SUCCESS;
   if (mkancesdirs (to, &wd, make_ancestor, x) == -1)
     {
       error (0, errno, _("cannot create directory %s"), quoteaf (to));
@@ -731,7 +813,7 @@ install_file_in_file_parents (char const *from, char *to,
                               const struct cp_options *x)
 {
   return (mkancesdirs_safe_wd (from, to, (struct cp_options *)x, false)
-          && install_file_in_file (from, to, x));
+          && install_file_in_file (from, to, AT_FDCWD, to, x));
 }
 
 /* Copy file FROM into directory TO_DIR, keeping its same name,
@@ -740,16 +822,39 @@ install_file_in_file_parents (char const *from, char *to,
 
 static bool
 install_file_in_dir (char const *from, char const *to_dir,
-                     const struct cp_options *x, bool mkdir_and_install)
+                     const struct cp_options *x, bool mkdir_and_install,
+                     int *target_dirfd)
 {
   char const *from_base = last_component (from);
-  char *to = file_name_concat (to_dir, from_base, NULL);
+  char *to_relname;
+  char *to = file_name_concat (to_dir, from_base, &to_relname);
   bool ret = true;
 
-  if (mkdir_and_install)
-    ret = mkancesdirs_safe_wd (from, to, (struct cp_options *)x, true);
+  if (!target_dirfd_valid (*target_dirfd)
+      && (ret = mkdir_and_install)
+      && (ret = mkancesdirs_safe_wd (from, to, (struct cp_options *) x, true)))
+    {
+      int fd = open (to_dir, O_PATHSEARCH | O_DIRECTORY);
+      if (fd < 0)
+        {
+          error (0, errno, _("cannot open %s"), quoteaf (to));
+          ret = false;
+        }
+      else
+        *target_dirfd = fd;
+    }
 
-  ret = ret && install_file_in_file (from, to, x);
+  if (ret)
+    {
+      int to_dirfd = *target_dirfd;
+      if (!target_dirfd_valid (to_dirfd))
+        {
+          to_dirfd = AT_FDCWD;
+          to_relname = to;
+        }
+      ret = install_file_in_file (from, to, to_dirfd, to_relname, x);
+    }
+
   free (to);
   return ret;
 }
@@ -757,8 +862,6 @@ install_file_in_dir (char const *from, char const *to_dir,
 int
 main (int argc, char **argv)
 {
-  int optc;
-  int exit_status = EXIT_SUCCESS;
   char const *specified_mode = NULL;
   bool make_backups = false;
   char const *backup_suffix = NULL;
@@ -767,8 +870,6 @@ main (int argc, char **argv)
   struct cp_options x;
   char const *target_directory = NULL;
   bool no_target_directory = false;
-  int n_files;
-  char **file;
   bool strip_program_specified = false;
   char const *scontext = NULL;
   /* set iff kernel has extra selinux system calls */
@@ -784,14 +885,12 @@ main (int argc, char **argv)
 
   cp_option_init (&x);
 
-  owner_name = NULL;
-  group_name = NULL;
-  strip_files = false;
-  dir_arg = false;
-  umask (0);
+  initial_umask = umask (0);
 
+  int optc;
   while ((optc = getopt_long (argc, argv, "bcCsDdg:m:o:pt:TvS:Z", long_options,
-                              NULL)) != -1)
+                              NULL))
+         != -1)
     {
       switch (optc)
         {
@@ -811,6 +910,9 @@ main (int argc, char **argv)
           /* System V fork+wait does not work if SIGCHLD is ignored.  */
           signal (SIGCHLD, SIG_DFL);
 #endif
+          break;
+        case DEBUG_OPTION:
+          x.debug = x.verbose = true;
           break;
         case STRIP_PROGRAM_OPTION:
           strip_program = xstrdup (optarg);
@@ -843,8 +945,8 @@ main (int argc, char **argv)
           break;
         case 't':
           if (target_directory)
-            die (EXIT_FAILURE, 0,
-                 _("multiple target directories specified"));
+            error (EXIT_FAILURE, 0,
+                   _("multiple target directories specified"));
           target_directory = optarg;
           break;
         case 'T':
@@ -893,23 +995,11 @@ main (int argc, char **argv)
 
   /* Check for invalid combinations of arguments. */
   if (dir_arg && strip_files)
-    die (EXIT_FAILURE, 0,
-         _("the strip option may not be used when installing a directory"));
+    error (EXIT_FAILURE, 0,
+           _("the strip option may not be used when installing a directory"));
   if (dir_arg && target_directory)
-    die (EXIT_FAILURE, 0,
-         _("target directory not allowed when installing a directory"));
-
-  if (target_directory)
-    {
-      struct stat st;
-      bool stat_success = stat (target_directory, &st) == 0 ? true : false;
-      if (! mkdir_and_install && ! stat_success)
-        die (EXIT_FAILURE, errno, _("failed to access %s"),
-             quoteaf (target_directory));
-      if (stat_success && ! S_ISDIR (st.st_mode))
-        die (EXIT_FAILURE, 0, _("target %s is not a directory"),
-             quoteaf (target_directory));
-    }
+    error (EXIT_FAILURE, 0,
+           _("target directory not allowed when installing a directory"));
 
   x.backup_type = (make_backups
                    ? xget_version (_("backup type"),
@@ -918,16 +1008,16 @@ main (int argc, char **argv)
   set_simple_backup_suffix (backup_suffix);
 
   if (x.preserve_security_context && (x.set_security_context || scontext))
-    die (EXIT_FAILURE, 0,
-         _("cannot set target context and preserve it"));
+    error (EXIT_FAILURE, 0,
+           _("cannot set target context and preserve it"));
 
   if (scontext && setfscreatecon (scontext) < 0)
-    die (EXIT_FAILURE, errno,
-         _("failed to set default file creation context to %s"),
+    error (EXIT_FAILURE, errno,
+           _("failed to set default file creation context to %s"),
          quote (scontext));
 
-  n_files = argc - optind;
-  file = argv + optind;
+  int n_files = argc - optind;
+  char **file = argv + optind;
 
   if (n_files <= ! (dir_arg || target_directory))
     {
@@ -939,32 +1029,47 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
+  struct stat sb;
+  int target_dirfd = AT_FDCWD;
   if (no_target_directory)
     {
       if (target_directory)
-        die (EXIT_FAILURE, 0,
-             _("cannot combine --target-directory (-t) "
-               "and --no-target-directory (-T)"));
+        error (EXIT_FAILURE, 0,
+               _("cannot combine --target-directory (-t) "
+                 "and --no-target-directory (-T)"));
       if (2 < n_files)
         {
           error (0, 0, _("extra operand %s"), quoteaf (file[2]));
           usage (EXIT_FAILURE);
         }
     }
-  else if (! (dir_arg || target_directory))
+  else if (target_directory)
     {
-      if (2 <= n_files && target_directory_operand (file[n_files - 1]))
-        target_directory = file[--n_files];
+      target_dirfd = target_directory_operand (target_directory, &sb);
+      if (! (target_dirfd_valid (target_dirfd)
+             || (mkdir_and_install && errno == ENOENT)))
+        error (EXIT_FAILURE, errno, _("failed to access %s"),
+               quoteaf (target_directory));
+    }
+  else if (!dir_arg)
+    {
+      char const *lastfile = file[n_files - 1];
+      int fd = target_directory_operand (lastfile, &sb);
+      if (target_dirfd_valid (fd))
+        {
+          target_dirfd = fd;
+          target_directory = lastfile;
+          n_files--;
+        }
       else if (2 < n_files)
-        die (EXIT_FAILURE, 0, _("target %s is not a directory"),
-             quoteaf (file[n_files - 1]));
+        error (EXIT_FAILURE, errno, _("target %s"), quoteaf (lastfile));
     }
 
   if (specified_mode)
     {
       struct mode_change *change = mode_compile (specified_mode);
       if (!change)
-        die (EXIT_FAILURE, 0, _("invalid mode %s"), quote (specified_mode));
+        error (EXIT_FAILURE, 0, _("invalid mode %s"), quote (specified_mode));
       mode = mode_adjust (0, false, 0, change, NULL);
       dir_mode = mode_adjust (0, true, 0, change, &dir_mode_bits);
       free (change);
@@ -973,13 +1078,6 @@ main (int argc, char **argv)
   if (strip_program_specified && !strip_files)
     error (0, 0, _("WARNING: ignoring --strip-program option as -s option was "
                    "not specified"));
-
-  if (copy_only_if_needed && x.preserve_timestamps)
-    {
-      error (0, 0, _("options --compare (-C) and --preserve-timestamps are "
-                     "mutually exclusive"));
-      usage (EXIT_FAILURE);
-    }
 
   if (copy_only_if_needed && strip_files)
     {
@@ -992,8 +1090,19 @@ main (int argc, char **argv)
     error (0, 0, _("the --compare (-C) option is ignored when you"
                    " specify a mode with non-permission bits"));
 
+  /* Initialize OWNER_ID and GROUP_ID from the given names.  */
   get_ids ();
 
+  /* If we are not stripping the file, set up the copy options so that
+     the copy function sets the mode and ownership using file descriptors.  */
+  if (! strip_files)
+    {
+      x.mode = mode;
+      x.owner = owner_id;
+      x.group = group_id;
+    }
+
+  int exit_status = EXIT_SUCCESS;
   if (dir_arg)
     exit_status = savewd_process_files (n_files, file, process_dir, &x);
   else
@@ -1006,22 +1115,20 @@ main (int argc, char **argv)
         {
           if (! (mkdir_and_install
                  ? install_file_in_file_parents (file[0], file[1], &x)
-                 : install_file_in_file (file[0], file[1], &x)))
+                 : install_file_in_file (file[0], file[1], AT_FDCWD,
+                                         file[1], &x)))
             exit_status = EXIT_FAILURE;
         }
       else
         {
-          int i;
           dest_info_init (&x);
-          for (i = 0; i < n_files; i++)
+          for (int i = 0; i < n_files; i++)
             if (! install_file_in_dir (file[i], target_directory, &x,
-                                       i == 0 && mkdir_and_install))
+                                       i == 0 && mkdir_and_install,
+                                       &target_dirfd))
               exit_status = EXIT_FAILURE;
-#ifdef lint
-          dest_info_free (&x);
-#endif
         }
     }
 
-  return exit_status;
+  main_exit (exit_status);
 }

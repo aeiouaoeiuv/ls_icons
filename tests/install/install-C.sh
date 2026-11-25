@@ -1,7 +1,7 @@
 #!/bin/sh
 # Ensure "install -C" works. (basic tests)
 
-# Copyright (C) 2008-2021 Free Software Foundation, Inc.
+# Copyright (C) 2008-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -78,9 +78,18 @@ compare out out_installed_second || fail=1
 ginstall -Cv -m$mode3 a b > out || fail=1
 compare out out_installed_second || fail=1
 
-# files are not regular files
+# non regular files
+ginstall -v -m$mode1 a b > out || fail=1  # reset to regular mode
+compare out out_installed_second || fail=1
+# symlink source is always dereferenced (and so regular here)
+ginstall -v -m$mode1 a d > out || fail=1  # create regular dest
+echo "'a' -> 'd'" > out_installed_first_ad || framework_failure_
+compare out out_installed_first_ad || fail=1
 ln -s a c || framework_failure_
-ln -s b d || framework_failure_
+ginstall -Cv -m$mode1 c d > out || fail=1
+compare out out_empty || fail=1
+# symlink dest never created by install so deemed non regular
+ln -nsf b d || framework_failure_
 ginstall -Cv -m$mode1 c d > out || fail=1
 echo "removed 'd'
 'c' -> 'd'" > out_installed_second_cd
@@ -106,8 +115,32 @@ compare out out_installed_second || fail=1
 ginstall -Cv -m$mode2 a b > out || fail=1
 compare out out_empty || fail=1
 
-# options -C and --preserve-timestamps are mutually exclusive
-returns_ 1 ginstall -C --preserve-timestamps a b || fail=1
+# Check -C without --preserve-timestamps with files having the same contents.
+echo a > a || framework_failure_
+echo a > b || framework_failure_
+touch -d 2026-01-01 a || framework_failure_
+test b -nt a || framework_failure_  # Handle systems with bad time.
+ginstall -C a b || fail=1
+test b -nt a || fail=1
+
+# Likewise, but with --preserve-timestamps.
+ginstall -C --preserve-timestamps a b || fail=1
+case $(stat --format=%y b) in
+  2026-01-01*) ;;
+  *) fail=1 ;;
+esac
+
+# Check -C without --preserve-timestamps with files having differing contents.
+echo b > b || framework_failure_
+ginstall -C a b || fail=1
+test b -nt a || fail=1
+
+# Check -C with --preserve-timestamps with files having differing contents.
+ginstall -C --preserve-timestamps a b || fail=1
+case $(stat --format=%y b) in
+  2026-01-01*) ;;
+  *) fail=1 ;;
+esac
 
 # options -C and --strip are mutually exclusive
 returns_ 1 ginstall -C --strip --strip-program=echo a b || fail=1

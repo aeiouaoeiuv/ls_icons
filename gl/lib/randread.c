@@ -1,6 +1,6 @@
 /* Generate buffers of random data.
 
-   Copyright (C) 2006-2021 Free Software Foundation, Inc.
+   Copyright (C) 2006-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -29,8 +29,6 @@
 #include <exitfail.h>
 #include <fcntl.h>
 #include <quote.h>
-#include <stdalign.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,29 +38,17 @@
 #include "gettext.h"
 #define _(msgid) gettext (msgid)
 
+#include "assure.h"
+#include "minmax.h"
 #include "rand-isaac.h"
 #include "stdio-safer.h"
 #include "unlocked-io.h"
 #include "xalloc.h"
 
-#ifndef __attribute__
-# if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 8)
-#  define __attribute__(x) /* empty */
-# endif
-#endif
-
-#ifndef ATTRIBUTE_NORETURN
-# define ATTRIBUTE_NORETURN __attribute__ ((__noreturn__))
-#endif
-
-#ifndef MIN
-# define MIN(a, b) ((a) < (b) ? (a) : (b))
-#endif
-
 #if _STRING_ARCH_unaligned || _STRING_INLINE_unaligned
-# define ALIGNED_POINTER(ptr, type) true
+# define POINTER_IS_ALIGNED(ptr, type) true
 #else
-# define ALIGNED_POINTER(ptr, type) ((size_t) (ptr) % alignof (type) == 0)
+# define POINTER_IS_ALIGNED(ptr, type) ((size_t) (ptr) % alignof (type) == 0)
 #endif
 
 /* The maximum buffer size used for reads of random data.  Using the
@@ -115,14 +101,13 @@ struct randread_source
 
 /* The default error handler.  */
 
-static void ATTRIBUTE_NORETURN
+static void
 randread_error (void const *file_name)
 {
-  if (file_name)
-    error (exit_failure, errno,
-           errno == 0 ? _("%s: end of file") : _("%s: read error"),
-           quote (file_name));
-  abort ();
+  affirm (exit_failure);
+  error (exit_failure, errno,
+         errno == 0 ? _("%s: end of file") : _("%s: read error"),
+         quote (file_name));
 }
 
 /* Simply return a new randread_source object with the default error
@@ -147,13 +132,30 @@ get_nonce (void *buffer, size_t bufsize)
   char *buf = buffer, *buflim = buf + bufsize;
   while (buf < buflim)
     {
-      ssize_t nbytes = getrandom (buf, buflim - buf, 0);
+#if defined __sun
+# define MAX_GETRANDOM 1024
+#else
+# define MAX_GETRANDOM SIZE_MAX
+#endif
+      size_t max_bytes = MIN (buflim - buf, MAX_GETRANDOM);
+      ssize_t nbytes = getrandom (buf, max_bytes, 0);
       if (0 <= nbytes)
         buf += nbytes;
       else if (errno != EINTR)
         return false;
     }
   return true;
+}
+
+/* Body of randread_free, broken out to pacify gcc -Wmismatched-dealloc.  */
+
+static int
+randread_free_body (struct randread_source *s)
+{
+  FILE *source = s->source;
+  memset_explicit (s, 0, sizeof *s);
+  free (s);
+  return source ? fclose (source) : 0;
 }
 
 /* Create and initialize a random data source from NAME, or use a
@@ -187,12 +189,22 @@ randread_new (char const *name, size_t bytes_bound)
         setvbuf (source, s->buf.c, _IOFBF, MIN (sizeof s->buf.c, bytes_bound));
       else
         {
+          /* Fill the ISAAC buffer.  Although it is tempting to read at
+             most BYTES_BOUND bytes, this is incorrect for two reasons.
+             First, BYTES_BOUND is just an estimate.
+             Second, even if the estimate is correct
+             ISAAC64 poorly randomizes when BYTES_BOUND is small
+             and just the first few bytes of s->buf.isaac.state.m
+             are random while the other bytes are all zero.  See:
+             Aumasson J-P. On the pseudo-random generator ISAAC.
+             Cryptology ePrint Archive. 2006;438.
+             <https://eprint.iacr.org/2006/438>.  */
           s->buf.isaac.buffered = 0;
           if (! get_nonce (s->buf.isaac.state.m,
-                           MIN (sizeof s->buf.isaac.state.m, bytes_bound)))
+                           sizeof s->buf.isaac.state.m))
             {
               int e = errno;
-              randread_free (s);
+              randread_free_body (s);
               errno = e;
               return NULL;
             }
@@ -269,7 +281,7 @@ readisaac (struct isaac *isaac, void *p, size_t size)
 
       /* If P is aligned, write to *P directly to avoid the overhead
          of copying from the buffer.  */
-      if (ALIGNED_POINTER (p, isaac_word))
+      if (POINTER_IS_ALIGNED (p, isaac_word))
         {
           isaac_word *wp = p;
           while (ISAAC_BYTES <= size)
@@ -313,8 +325,5 @@ randread (struct randread_source *s, void *buf, size_t size)
 int
 randread_free (struct randread_source *s)
 {
-  FILE *source = s->source;
-  explicit_bzero (s, sizeof *s);
-  free (s);
-  return (source ? fclose (source) : 0);
+  return randread_free_body (s);
 }

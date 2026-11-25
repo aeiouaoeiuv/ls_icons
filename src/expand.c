@@ -1,5 +1,5 @@
 /* expand - convert tabs to spaces
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -37,9 +37,11 @@
 #include <stdio.h>
 #include <getopt.h>
 #include <sys/types.h>
-#include "system.h"
-#include "die.h"
 
+#include "system.h"
+#include "ioblksize.h"
+#include "mcel.h"
+#include "mbbuf.h"
 #include "expand-common.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
@@ -76,13 +78,17 @@ Convert tabs in each FILE to spaces, writing to standard output.\n\
       emit_stdin_note ();
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-  -i, --initial    do not convert tabs after non blanks\n\
-  -t, --tabs=N     have tabs N characters apart, not 8\n\
-"), stdout);
-      emit_tab_list_info ();
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -i, --initial\n\
+         do not convert tabs after non blanks\n\
+"));
+      oputs (_("\
+  -t, --tabs=N\n\
+         have tabs N characters apart, not 8\n\
+"));
+      emit_tab_list_info (PROGRAM_NAME);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -101,10 +107,14 @@ expand (void)
   if (!fp)
     return;
 
+  static char line_in[IO_BUFSIZE];
+  mbbuf_t mbbuf;
+  mbbuf_init (&mbbuf, line_in, sizeof line_in, fp);
+
   while (true)
     {
       /* Input character, or EOF.  */
-      int c;
+      mcel_t g;
 
       /* If true, perform translations.  */
       bool convert = true;
@@ -114,43 +124,41 @@ expand (void)
          is true:  */
 
       /* Column of next input character.  */
-      uintmax_t column = 0;
+      colno column = 0;
 
       /* Index in TAB_LIST of next tab stop to examine.  */
-      size_t tab_index = 0;
+      idx_t tab_index = 0;
 
 
       /* Convert a line of text.  */
 
       do
         {
-          while ((c = getc (fp)) < 0 && (fp = next_file (fp)))
-            continue;
+          while ((g = mbbuf_get_char (&mbbuf)).ch == MBBUF_EOF
+                 && (fp = next_file (fp)))
+            mbbuf_init (&mbbuf, line_in, sizeof line_in, fp);
 
           if (convert)
             {
-              if (c == '\t')
+              convert &= convert_entire_line || c32issep (g.ch);
+
+              if (g.ch == '\t')
                 {
                   /* Column the next input tab stop is on.  */
-                  uintmax_t next_tab_column;
-                  bool last_tab IF_LINT (=0);
-
-                  next_tab_column = get_next_tab_column (column, &tab_index,
-                                                         &last_tab);
-
-                  if (last_tab)
-                    next_tab_column = column + 1;
-
-                  if (next_tab_column < column)
-                    die (EXIT_FAILURE, 0, _("input line is too long"));
+                  bool last_tab;
+                  colno next_tab_column
+                    = get_next_tab_column (column, &tab_index, &last_tab);
 
                   while (++column < next_tab_column)
                     if (putchar (' ') < 0)
-                      die (EXIT_FAILURE, errno, _("write error"));
+                      write_error ();
 
-                  c = ' ';
+                  if (putchar (' ') < 0)
+                    write_error ();
+
+                  continue;
                 }
-              else if (c == '\b')
+              else if (g.ch == '\b')
                 {
                   /* Go back one column, and force recalculation of the
                      next tab stop.  */
@@ -159,21 +167,21 @@ expand (void)
                 }
               else
                 {
-                  column++;
-                  if (!column)
-                    die (EXIT_FAILURE, 0, _("input line is too long"));
+                  int width = c32width (g.ch);
+                  if (ckd_add (&column, column, width < 0 ? 1 : width))
+                    error (EXIT_FAILURE, 0, _("input line is too long"));
                 }
 
-              convert &= convert_entire_line || !! isblank (c);
             }
 
-          if (c < 0)
+          if (g.ch == MBBUF_EOF)
             return;
 
-          if (putchar (c) < 0)
-            die (EXIT_FAILURE, errno, _("write error"));
+          fwrite (mbbuf_char_offset (&mbbuf, g), sizeof (char), g.len, stdout);
+          if (ferror (stdout))
+            write_error ();
         }
-      while (c != '\n');
+      while (g.ch != '\n');
     }
 }
 
@@ -227,7 +235,7 @@ main (int argc, char **argv)
 
   finalize_tab_stops ();
 
-  set_file_list ((optind < argc) ? &argv[optind] : NULL);
+  set_file_list (optind < argc ? &argv[optind] : NULL);
 
   expand ();
 

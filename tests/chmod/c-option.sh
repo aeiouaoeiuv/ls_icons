@@ -1,7 +1,7 @@
 #!/bin/sh
 # Verify that chmod's --changes (-c) option works.
 
-# Copyright (C) 2000-2021 Free Software Foundation, Inc.
+# Copyright (C) 2000-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -47,5 +47,13 @@ chmod g+s a/b
 # bits are set on b (the common case under test)
 chmod -c -R g+w a 2>err
 compare /dev/null err || fail=1
+
+# Verify special bits on the link itself, even when its target is missing.
+ln -s missing link || framework_failure_
+if chmod -h 1755 link 2>/dev/null; then
+  chmod -ch 1755 link >out 2>err || fail=1
+  compare /dev/null out || fail=1
+  compare /dev/null err || fail=1
+fi
 
 Exit $fail

@@ -1,5 +1,5 @@
 /* GNU's users.
-   Copyright (C) 1992-2021 Free Software Foundation, Inc.
+   Copyright (C) 1992-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,8 +22,6 @@
 #include <sys/types.h>
 #include "system.h"
 
-#include "die.h"
-#include "error.h"
 #include "long-options.h"
 #include "quote.h"
 #include "readutmp.h"
@@ -44,11 +42,10 @@ userid_compare (const void *v_a, const void *v_b)
 }
 
 static void
-list_entries_users (size_t n, const STRUCT_UTMP *this)
+list_entries_users (idx_t n, STRUCT_UTMP const *this)
 {
-  char **u = xnmalloc (n, sizeof *u);
-  size_t i;
-  size_t n_entries = 0;
+  char **u = xinmalloc (n, sizeof *u);
+  idx_t n_entries = 0;
 
   while (n--)
     {
@@ -66,14 +63,14 @@ list_entries_users (size_t n, const STRUCT_UTMP *this)
 
   qsort (u, n_entries, sizeof (u[0]), userid_compare);
 
-  for (i = 0; i < n_entries; i++)
+  for (idx_t i = 0; i < n_entries; i++)
     {
       char c = (i < n_entries - 1 ? ' ' : '\n');
       fputs (u[i], stdout);
       putchar (c);
     }
 
-  for (i = 0; i < n_entries; i++)
+  for (idx_t i = 0; i < n_entries; i++)
     free (u[i]);
   free (u);
 }
@@ -84,11 +81,11 @@ list_entries_users (size_t n, const STRUCT_UTMP *this)
 static void
 users (char const *filename, int options)
 {
-  size_t n_users;
+  idx_t n_users;
   STRUCT_UTMP *utmp_buf;
-
+  options |= READ_UTMP_USER_PROCESS;
   if (read_utmp (filename, &n_users, &utmp_buf, options) != 0)
-    die (EXIT_FAILURE, errno, "%s", quotef (filename));
+    error (EXIT_FAILURE, errno, "%s", quotef (filename));
 
   list_entries_users (n_users, utmp_buf);
 
@@ -109,8 +106,8 @@ If FILE is not specified, use %s.  %s as FILE is common.\n\
 \n\
 "),
               UTMP_FILE, WTMP_FILE);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);

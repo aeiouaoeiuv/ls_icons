@@ -1,7 +1,7 @@
 #!/bin/sh
 # Test "ln --relative".
 
-# Copyright (C) 2012-2021 Free Software Foundation, Inc.
+# Copyright (C) 2012-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -45,9 +45,42 @@ mkdir web
 ln -sr latest web/latest
 test $(readlink web/latest) = '../release2' || fail=1
 
-# Expect this to fail with exit status 1, or to succeed quietly (freebsd).
-# Prior to coreutils-8.23, it would segfault.
-ln -sr '' F
-case $? in [01]) ;; *) fail=1;; esac
+# This would replace d/a with a symbolic link to itself with coreutils-8.31
+# through coreutils-9.12.
+echo a >exp-a &&
+mkdir d &&
+cp exp-a d/a &&
+echo "ln: 'd/a' and 'd/a' are the same file" >exp-err || framework_failure_
+returns_ 1 ln -srf d/a d/a >out 2>err || fail=1
+compare /dev/null out || fail=1
+compare exp-err err || fail=1
+compare exp-a d/a || fail=1
+
+# Likewise, using a symbolic link target directory.
+ln -s d d-slink &&
+echo "ln: 'd/a' and 'd-slink/a' are the same file" >exp-err \
+  || framework_failure_
+returns_ 1 ln -srf d/a d-slink >out 2>err || fail=1
+compare /dev/null out || fail=1
+compare exp-err err || fail=1
+compare exp-a d/a || fail=1
+
+# A relative operand that cannot be canonicalized must not be installed
+# verbatim in another directory.  An absolute operand can be kept as given.
+ln -s cycle/x cycle || framework_failure_
+returns_ 1 ln -srf cycle d/a || fail=1
+compare exp-a d/a || fail=1
+abs_cycle=$(pwd)/./cycle
+ln -sr "$abs_cycle" web/cycle || fail=1
+test "$(readlink web/cycle)" = "$abs_cycle" || fail=1
+
+# Preserve an empty target on systems that accept one (e.g., FreeBSD).
+# Prior to coreutils-8.23, this would segfault.
+if ln -s '' plain 2>/dev/null; then
+  ln -sr '' F || fail=1
+  test -L F || fail=1
+else
+  returns_ 1 ln -sr '' F || fail=1
+fi
 
 Exit $fail

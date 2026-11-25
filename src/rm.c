@@ -1,5 +1,5 @@
 /* 'rm' file deletion utility for GNU.
-   Copyright (C) 1988-2021 Free Software Foundation, Inc.
+   Copyright (C) 1988-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,12 +22,10 @@
 #include <stdio.h>
 #include <getopt.h>
 #include <sys/types.h>
-#include <assert.h>
 
 #include "system.h"
 #include "argmatch.h"
-#include "die.h"
-#include "error.h"
+#include "assure.h"
 #include "remove.h"
 #include "root-dev-ino.h"
 #include "yesno.h"
@@ -134,38 +132,65 @@ usage (int status)
       fputs (_("\
 Remove (unlink) the FILE(s).\n\
 \n\
-  -f, --force           ignore nonexistent files and arguments, never prompt\n\
-  -i                    prompt before every removal\n\
 "), stdout);
-      fputs (_("\
-  -I                    prompt once before removing more than three files, or\n\
-                          when removing recursively; less intrusive than -i,\n\
-                          while still giving protection against most mistakes\n\
-      --interactive[=WHEN]  prompt according to WHEN: never, once (-I), or\n\
-                          always (-i); without WHEN, prompt always\n\
-"), stdout);
-      fputs (_("\
-      --one-file-system  when removing a hierarchy recursively, skip any\n\
-                          directory that is on a file system different from\n\
-                          that of the corresponding command line argument\n\
-"), stdout);
-      fputs (_("\
-      --no-preserve-root  do not treat '/' specially\n\
-      --preserve-root[=all]  do not remove '/' (default);\n\
-                              with 'all', reject any command line argument\n\
-                              on a separate device from its parent\n\
-"), stdout);
-      fputs (_("\
-  -r, -R, --recursive   remove directories and their contents recursively\n\
-  -d, --dir             remove empty directories\n\
-  -v, --verbose         explain what is being done\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -f, --force\n\
+         ignore nonexistent files and arguments, never prompt\n\
+"));
+      oputs (_("\
+  -i\n\
+         prompt before every removal\n\
+"));
+      oputs (_("\
+  -I\n\
+         prompt once before removing more than three files,\n\
+         or when removing recursively; less intrusive than -i,\n\
+         while still giving protection against most mistakes\n\
+"));
+      oputs (_("\
+      --interactive[=WHEN]\n\
+         prompt according to WHEN: never, once (-I), or always (-i);\n\
+         without WHEN, prompt always\n\
+"));
+      oputs (_("\
+      --one-file-system\n\
+         when removing a hierarchy recursively,\n\
+         skip any directory that is on a file system different\n\
+         from that of the corresponding command line argument\n\
+"));
+      oputs (_("\
+      --no-preserve-root\n\
+         do not treat '/' specially\n\
+"));
+      oputs (_("\
+      --preserve-root[=all]\n\
+         do not remove '/' (default);\n\
+         with 'all', reject any command line argument\n\
+         on a separate device from its parent\n\
+"));
+      oputs (_("\
+  -r, -R, --recursive\n\
+         remove directories and their contents recursively\n\
+"));
+      oputs (_("\
+  -d, --dir\n\
+         remove empty directories\n\
+"));
+      oputs (_("\
+  -v, --verbose\n\
+         explain what is being done\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
 By default, rm does not remove directories.  Use the --recursive (-r or -R)\n\
 option to remove each listed directory, too, along with all of its contents.\n\
+"), stdout);
+      fputs (_("\
+\n\
+Any attempt to remove a file whose last file name component is '.' or '..'\n\
+is rejected with a diagnostic.\n\
 "), stdout);
       printf (_("\
 \n\
@@ -178,9 +203,9 @@ use one of these commands:\n\
               program_name, program_name);
       fputs (_("\
 \n\
-Note that if you use rm to remove a file, it might be possible to recover\n\
+If you use rm to remove a file, it might be possible to recover\n\
 some of its contents, given sufficient expertise and/or time.  For greater\n\
-assurance that the contents are truly unrecoverable, consider using shred(1).\n\
+assurance that the contents are unrecoverable, consider using shred(1).\n\
 "), stdout);
       emit_ancillary_info (PROGRAM_NAME);
     }
@@ -292,23 +317,21 @@ main (int argc, char **argv)
           break;
 
         case NO_PRESERVE_ROOT:
-          if (! STREQ (argv[optind - 1], "--no-preserve-root"))
-            die (EXIT_FAILURE, 0,
-                 _("you may not abbreviate the --no-preserve-root option"));
+          if (! streq (argv[optind - 1], "--no-preserve-root"))
+            error (EXIT_FAILURE, 0,
+                   _("you may not abbreviate the --no-preserve-root option"));
           preserve_root = false;
           break;
 
         case PRESERVE_ROOT:
           if (optarg)
             {
-              if STREQ (optarg, "all")
+              if (streq (optarg, "all"))
                 x.preserve_all_root = true;
               else
-                {
-                  die (EXIT_FAILURE, 0,
+                error (EXIT_FAILURE, 0,
                        _("unrecognized --preserve-root argument: %s"),
                        quoteaf (optarg));
-                }
             }
           preserve_root = true;
           break;
@@ -345,8 +368,8 @@ main (int argc, char **argv)
       static struct dev_ino dev_ino_buf;
       x.root_dev_ino = get_root_dev_ino (&dev_ino_buf);
       if (x.root_dev_ino == NULL)
-        die (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
-             quoteaf ("/"));
+        error (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
+               quoteaf ("/"));
     }
 
   uintmax_t n_files = argc - optind;
@@ -356,11 +379,11 @@ main (int argc, char **argv)
     {
       fprintf (stderr,
                (x.recursive
-                ? ngettext ("%s: remove %"PRIuMAX" argument recursively? ",
-                            "%s: remove %"PRIuMAX" arguments recursively? ",
+                ? ngettext ("%s: remove %ju argument recursively? ",
+                            "%s: remove %ju arguments recursively? ",
                             select_plural (n_files))
-                : ngettext ("%s: remove %"PRIuMAX" argument? ",
-                            "%s: remove %"PRIuMAX" arguments? ",
+                : ngettext ("%s: remove %ju argument? ",
+                            "%s: remove %ju arguments? ",
                             select_plural (n_files))),
                program_name, n_files);
       if (!yesno ())
@@ -368,6 +391,6 @@ main (int argc, char **argv)
     }
 
   enum RM_status status = rm (file, &x);
-  assert (VALID_STATUS (status));
+  affirm (VALID_STATUS (status));
   return status == RM_ERROR ? EXIT_FAILURE : EXIT_SUCCESS;
 }

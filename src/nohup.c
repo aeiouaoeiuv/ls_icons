@@ -1,5 +1,5 @@
 /* nohup -- run a command immune to hangups, with output to a non-tty
-   Copyright (C) 2003-2021 Free Software Foundation, Inc.
+   Copyright (C) 2003-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,7 +23,6 @@
 
 #include "system.h"
 
-#include "error.h"
 #include "filenamecat.h"
 #include "fd-reopen.h"
 #include "long-options.h"
@@ -57,8 +56,8 @@ Usage: %s COMMAND [ARG]...\n\
 Run COMMAND, ignoring hangup signals.\n\
 \n\
 "), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       printf (_("\n\
 If standard input is a terminal, redirect it from an unreadable file.\n\
 If standard output is a terminal, append output to 'nohup.out' if possible,\n\
@@ -67,22 +66,21 @@ If standard error is a terminal, redirect it to standard output.\n\
 To save output to FILE, use '%s COMMAND > FILE'.\n"),
               program_name);
       printf (USAGE_BUILTIN_WARNING, PROGRAM_NAME);
+      emit_exec_status (PROGRAM_NAME);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
 }
 
+/* GCC 13 gets confused by the dup2 calls
+   <https://gcc.gnu.org/PR109839>.  */
+#if 13 <= __GNUC__
+# pragma GCC diagnostic ignored "-Wanalyzer-fd-leak"
+#endif
+
 int
 main (int argc, char **argv)
 {
-  int out_fd = STDOUT_FILENO;
-  int saved_stderr_fd = STDERR_FILENO;
-  bool ignoring_input;
-  bool redirecting_stdout;
-  bool stdout_is_closed;
-  bool redirecting_stderr;
-  int exit_internal_failure;
-
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   setlocale (LC_ALL, "");
@@ -93,8 +91,8 @@ main (int argc, char **argv)
      for env, exec, nice, time, and xargs where it requires internal
      failure give something in the range 1-125.  For consistency with
      other tools, fail with EXIT_CANCELED unless POSIXLY_CORRECT.  */
-  exit_internal_failure = (getenv ("POSIXLY_CORRECT")
-                           ? POSIX_NOHUP_FAILURE : EXIT_CANCELED);
+  int exit_internal_failure = (getenv ("POSIXLY_CORRECT")
+                               ? POSIX_NOHUP_FAILURE : EXIT_CANCELED);
   initialize_exit_failure (exit_internal_failure);
   atexit (close_stdout);
 
@@ -108,10 +106,10 @@ main (int argc, char **argv)
       usage (exit_internal_failure);
     }
 
-  ignoring_input = isatty (STDIN_FILENO);
-  redirecting_stdout = isatty (STDOUT_FILENO);
-  stdout_is_closed = (!redirecting_stdout && errno == EBADF);
-  redirecting_stderr = isatty (STDERR_FILENO);
+  bool ignoring_input = isatty (STDIN_FILENO);
+  bool redirecting_stdout = isatty (STDOUT_FILENO);
+  bool stdout_is_closed = (!redirecting_stdout && errno == EBADF);
+  bool redirecting_stderr = isatty (STDERR_FILENO);
 
   /* If standard input is a tty, replace it with /dev/null if possible.
      Note that it is deliberately opened for *writing*,
@@ -129,13 +127,14 @@ main (int argc, char **argv)
      First try nohup.out, then $HOME/nohup.out.  If standard error is
      a tty and standard output is closed, open nohup.out or
      $HOME/nohup.out without redirecting anything.  */
+  int out_fd = STDOUT_FILENO;
   if (redirecting_stdout || (redirecting_stderr && stdout_is_closed))
     {
       char *in_home = NULL;
       char const *file = "nohup.out";
       int flags = O_CREAT | O_WRONLY | O_APPEND;
       mode_t mode = S_IRUSR | S_IWUSR;
-      mode_t umask_value = umask (~mode);
+      mode_t umask_value = umask (0);
       out_fd = (redirecting_stdout
                 ? fd_reopen (STDOUT_FILENO, file, flags, mode)
                 : open (file, flags, mode));
@@ -173,6 +172,7 @@ main (int argc, char **argv)
     }
 
   /* If standard error is a tty, redirect it.  */
+  int saved_stderr_fd = STDERR_FILENO;
   if (redirecting_stderr)
     {
       /* Save a copy of stderr before redirecting, so we can use the original
@@ -185,8 +185,9 @@ main (int argc, char **argv)
       if (!redirecting_stdout)
         error (0, 0,
                _(ignoring_input
-                 ? N_("ignoring input and redirecting stderr to stdout")
-                 : N_("redirecting stderr to stdout")));
+                 ? N_("ignoring input and redirecting standard error "
+                      "to standard output")
+                 : N_("redirecting standard error to standard output")));
 
       if (dup2 (out_fd, STDERR_FILENO) < 0)
         error (exit_internal_failure, errno,
@@ -205,7 +206,10 @@ main (int argc, char **argv)
   if (ferror (stderr))
     return exit_internal_failure;
 
+  /* Windows does not support SIGHUP.  */
+#ifdef SIGHUP
   signal (SIGHUP, SIG_IGN);
+#endif
 
   char **cmd = argv + optind;
   execvp (*cmd, cmd);

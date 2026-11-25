@@ -1,5 +1,5 @@
 /* set-fields.c -- common functions for parsing field list
-   Copyright (C) 2015-2021 Free Software Foundation, Inc.
+   Copyright (C) 2015-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@
 #include <config.h>
 
 #include "system.h"
-#include "error.h"
+#include "c-ctype.h"
 #include "quote.h"
 #include "set-fields.h"
 
@@ -27,10 +27,10 @@
 struct field_range_pair *frp;
 
 /* Number of finite ranges specified by the user. */
-size_t n_frp;
+idx_t n_frp;
 
 /* Number of `struct field_range_pair's allocated. */
-static size_t n_frp_allocated;
+static idx_t n_frp_allocated;
 
 #define FATAL_ERROR(Message)                                            \
   do                                                                    \
@@ -47,7 +47,7 @@ static void
 add_range_pair (uintmax_t lo, uintmax_t hi)
 {
   if (n_frp == n_frp_allocated)
-    frp = X2NREALLOC (frp, &n_frp_allocated);
+    frp = xpalloc (frp, &n_frp_allocated, 1, -1, sizeof *frp);
   frp[n_frp].lo = lo;
   frp[n_frp].hi = hi;
   ++n_frp;
@@ -55,13 +55,12 @@ add_range_pair (uintmax_t lo, uintmax_t hi)
 
 
 /* Comparison function for qsort to order the list of
-   struct range_pairs.  */
+   struct field_range_pairs.  */
 static int
 compare_ranges (const void *a, const void *b)
 {
-  int a_start = ((const struct field_range_pair *) a)->lo;
-  int b_start = ((const struct field_range_pair *) b)->lo;
-  return a_start < b_start ? -1 : a_start > b_start;
+  struct field_range_pair const *ap = a, *bp = b;
+  return _GL_CMP (ap->lo, bp->lo);
 }
 
 /* Reallocate Range Pair entries, with corresponding
@@ -71,7 +70,7 @@ static void
 complement_rp (void)
 {
   struct field_range_pair *c = frp;
-  size_t n = n_frp;
+  idx_t n = n_frp;
 
   frp = NULL;
   n_frp = 0;
@@ -80,16 +79,16 @@ complement_rp (void)
   if (c[0].lo > 1)
     add_range_pair (1, c[0].lo - 1);
 
-  for (size_t i = 1; i < n; ++i)
+  for (idx_t i = 1; i < n; ++i)
     {
-      if (c[i-1].hi + 1 == c[i].lo)
+      if (c[i - 1].hi + 1 == c[i].lo)
         continue;
 
-      add_range_pair (c[i-1].hi + 1, c[i].lo - 1);
+      add_range_pair (c[i - 1].hi + 1, c[i].lo - 1);
     }
 
-  if (c[n-1].hi < UINTMAX_MAX)
-    add_range_pair (c[n-1].hi + 1, UINTMAX_MAX);
+  if (c[n - 1].hi < UINTMAX_MAX)
+    add_range_pair (c[n - 1].hi + 1, UINTMAX_MAX);
 
   free (c);
 }
@@ -147,7 +146,7 @@ set_fields (char const *fieldstr, unsigned int options)
   /* Collect and store in RP the range end points. */
 
   /* Special case: '--field=-' means all fields, emulate '--field=1-' . */
-  if ((options & SETFLD_ALLOW_DASH) && STREQ (fieldstr,"-"))
+  if ((options & SETFLD_ALLOW_DASH) && streq (fieldstr,"-"))
     {
       value = 1;
       lhs_specified = true;
@@ -231,7 +230,7 @@ set_fields (char const *fieldstr, unsigned int options)
           lhs_specified = false;
           rhs_specified = false;
         }
-      else if (ISDIGIT (*fieldstr))
+      else if (c_isdigit (*fieldstr))
         {
           /* Record beginning of digit string, in case we have to
              complain about it.  */
@@ -246,14 +245,13 @@ set_fields (char const *fieldstr, unsigned int options)
             lhs_specified = 1;
 
           /* Detect overflow.  */
-          if (!DECIMAL_DIGIT_ACCUMULATE (value, *fieldstr - '0', uintmax_t)
+          if (!DECIMAL_DIGIT_ACCUMULATE (value, *fieldstr - '0')
               || value == UINTMAX_MAX)
             {
               /* In case the user specified -c$(echo 2^64|bc),22,
                  complain only about the first number.  */
-              /* Determine the length of the offending number.  */
-              size_t len = strspn (num_start, "0123456789");
-              char *bad_num = ximemdup0 (num_start, len);
+              char *bad_num = ximemdup0 (num_start,
+                                         strspn (num_start, "0123456789"));
               error (0, 0, (options & SETFLD_ERRMSG_USE_POS)
                            ?_("byte/character offset %s is too large")
                            :_("field number %s is too large"),
@@ -282,9 +280,9 @@ set_fields (char const *fieldstr, unsigned int options)
   qsort (frp, n_frp, sizeof (frp[0]), compare_ranges);
 
   /* Merge range pairs (e.g. `2-5,3-4' becomes `2-5'). */
-  for (size_t i = 0; i < n_frp; ++i)
+  for (idx_t i = 0; i < n_frp; ++i)
     {
-      for (size_t j = i + 1; j < n_frp; ++j)
+      for (idx_t j = i + 1; j < n_frp; ++j)
         {
           if (frp[j].lo <= frp[i].hi)
             {
@@ -305,15 +303,6 @@ set_fields (char const *fieldstr, unsigned int options)
      Also add a sentinel at the end of RP, to avoid out of bounds access
      and for performance reasons.  */
   ++n_frp;
-  frp = xrealloc (frp, n_frp * sizeof (struct field_range_pair));
+  frp = xreallocarray (frp, n_frp, sizeof (struct field_range_pair));
   frp[n_frp - 1].lo = frp[n_frp - 1].hi = UINTMAX_MAX;
-}
-
-void
-reset_fields (void)
-{
-  n_frp = 0 ;
-  n_frp_allocated = 0;
-  free (frp);
-  frp = NULL;
 }

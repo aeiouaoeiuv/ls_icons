@@ -1,6 +1,6 @@
 /* whoami -- print effective userid
 
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -24,8 +24,6 @@
 #include <pwd.h>
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "long-options.h"
 #include "quote.h"
 
@@ -47,8 +45,8 @@ Print the user name associated with the current effective user ID.\n\
 Same as id -un.\n\
 \n\
 "), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -57,8 +55,6 @@ Same as id -un.\n\
 int
 main (int argc, char **argv)
 {
-  struct passwd *pw;
-  uid_t uid;
   uid_t NO_UID = -1;
 
   initialize_main (&argc, &argv);
@@ -80,11 +76,11 @@ main (int argc, char **argv)
     }
 
   errno = 0;
-  uid = geteuid ();
-  pw = (uid == NO_UID && errno ? NULL : getpwuid (uid));
+  uid_t uid = geteuid ();
+  struct passwd *pw = uid == NO_UID && errno ? NULL : getpwuid (uid);
   if (!pw)
-    die (EXIT_FAILURE, errno, _("cannot find name for user ID %lu"),
-         (unsigned long int) uid);
+    error (EXIT_FAILURE, errno, _("cannot find name for user ID %ju"),
+           (uintmax_t) uid);
   puts (pw->pw_name);
   return EXIT_SUCCESS;
 }

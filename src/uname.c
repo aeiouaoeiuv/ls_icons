@@ -1,6 +1,6 @@
 /* uname -- print system information
 
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -27,7 +27,7 @@
 # include <sys/systeminfo.h>
 #endif
 
-#if HAVE_SYS_SYSCTL_H && ! defined __GLIBC__
+#if HAVE_SYS_SYSCTL_H && ! defined __GLIBC__ && ! defined __APPLE__
 # if HAVE_SYS_PARAM_H
 #  include <sys/param.h> /* needed for OpenBSD 3.0 */
 # endif
@@ -44,14 +44,7 @@
 # endif
 #endif
 
-#ifdef __APPLE__
-# include <mach/machine.h>
-# include <mach-o/arch.h>
-#endif
-
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "quote.h"
 #include "uname.h"
 
@@ -86,9 +79,12 @@
 /* Operating system.  */
 #define PRINT_OPERATING_SYSTEM 128
 
+static bool labeled = false;
+
 static struct option const uname_long_options[] =
 {
   {"all", no_argument, NULL, 'a'},
+  {"all-labeled", no_argument, NULL, 'A'},
   {"kernel-name", no_argument, NULL, 's'},
   {"sysname", no_argument, NULL, 's'},	/* Obsolescent.  */
   {"nodename", no_argument, NULL, 'n'},
@@ -125,19 +121,39 @@ usage (int status)
           fputs (_("\
 Print certain system information.  With no OPTION, same as -s.\n\
 \n\
+"), stdout);
+          oputs (_("\
   -a, --all                print all information, in the following order,\n\
-                             except omit -p and -i if unknown:\n\
+                             except omit -p and -i if unknown\n\
+"));
+          oputs (_("\
+  -A, --all-labeled        print all information, one labeled field per line,\n\
+                             except omit -p and -i if unknown\n\
+"));
+          oputs (_("\
   -s, --kernel-name        print the kernel name\n\
+"));
+          oputs (_("\
   -n, --nodename           print the network node hostname\n\
+"));
+          oputs (_("\
   -r, --kernel-release     print the kernel release\n\
-"), stdout);
-          fputs (_("\
+"));
+          oputs (_("\
   -v, --kernel-version     print the kernel version\n\
+"));
+          oputs (_("\
   -m, --machine            print the machine hardware name\n\
+"));
+          oputs (_("\
   -p, --processor          print the processor type (non-portable)\n\
+"));
+          oputs (_("\
   -i, --hardware-platform  print the hardware platform (non-portable)\n\
+"));
+          oputs (_("\
   -o, --operating-system   print the operating system\n\
-"), stdout);
+"));
         }
       else
         {
@@ -147,8 +163,8 @@ Print machine architecture.\n\
 "), stdout);
         }
 
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -158,13 +174,40 @@ Print machine architecture.\n\
    printed.  */
 
 static void
-print_element (char const *element)
+print_element (char const *element, char const *label)
 {
-  static bool printed;
-  if (printed)
-    putchar (' ');
-  printed = true;
-  fputs (element, stdout);
+  if (labeled)
+    {
+      printf ("%s: %s\n", label, element);
+    }
+  else
+    {
+      static bool printed;
+      if (printed)
+        putchar (' ');
+      printed = true;
+      fputs (element, stdout);
+    }
+}
+
+/* Print ELEMENT, preceded by a space if something has already been
+   printed.  But if the environment variable ENVVAR is set, print its
+   value instead of ELEMENT.  */
+
+static void
+print_element_env (char const *element,
+                   MAYBE_UNUSED char const *envvar,
+                   char const *label)
+{
+#ifdef __APPLE__
+  if (envvar)
+    {
+      char const *val = getenv (envvar);
+      if (val)
+        element = val;
+    }
+#endif
+  print_element (element, label);
 }
 
 
@@ -180,7 +223,8 @@ decode_switches (int argc, char **argv)
   if (uname_mode == UNAME_ARCH)
     {
       while ((c = getopt_long (argc, argv, "",
-                               arch_long_options, NULL)) != -1)
+                               arch_long_options, NULL))
+             != -1)
         {
           switch (c)
             {
@@ -196,13 +240,20 @@ decode_switches (int argc, char **argv)
     }
   else
     {
-      while ((c = getopt_long (argc, argv, "asnrvmpio",
-                               uname_long_options, NULL)) != -1)
+      while ((c = getopt_long (argc, argv, "asnrvmpioA",
+                               uname_long_options, NULL))
+             != -1)
         {
           switch (c)
             {
             case 'a':
               toprint = UINT_MAX;
+              labeled = false;
+              break;
+
+            case 'A':
+              toprint = UINT_MAX;
+              labeled = true;
               break;
 
             case 's':
@@ -284,29 +335,39 @@ main (int argc, char **argv)
       struct utsname name;
 
       if (uname (&name) == -1)
-        die (EXIT_FAILURE, errno, _("cannot get system name"));
+        error (EXIT_FAILURE, errno, _("cannot get system name"));
 
       if (toprint & PRINT_KERNEL_NAME)
-        print_element (name.sysname);
+        print_element_env (name.sysname, "UNAME_SYSNAME", _("Kernel name"));
       if (toprint & PRINT_NODENAME)
-        print_element (name.nodename);
+        print_element_env (name.nodename, "UNAME_NODENAME", _("Node name"));
       if (toprint & PRINT_KERNEL_RELEASE)
-        print_element (name.release);
+        print_element_env (name.release, "UNAME_RELEASE", _("Kernel release"));
       if (toprint & PRINT_KERNEL_VERSION)
-        print_element (name.version);
+        print_element_env (name.version, "UNAME_VERSION", _("Kernel version"));
       if (toprint & PRINT_MACHINE)
-        print_element (name.machine);
+        print_element_env (name.machine, "UNAME_MACHINE", _("Machine"));
     }
 
   if (toprint & PRINT_PROCESSOR)
     {
       char const *element = unknown;
+#ifdef __APPLE__
+# if defined __arm__ || defined __arm64__
+      element = "arm";
+# elif defined __i386__ || defined __x86_64__
+      element = "i386";
+# elif defined __ppc__ || defined __ppc64__
+      element = "powerpc";
+# endif
+#endif
 #if HAVE_SYSINFO && defined SI_ARCHITECTURE
-      {
-        static char processor[257];
-        if (0 <= sysinfo (SI_ARCHITECTURE, processor, sizeof processor))
-          element = processor;
-      }
+      if (element == unknown)
+        {
+          static char processor[257];
+          if (0 <= sysinfo (SI_ARCHITECTURE, processor, sizeof processor))
+            element = processor;
+        }
 #endif
 #ifdef UNAME_PROCESSOR
       if (element == unknown)
@@ -316,30 +377,10 @@ main (int argc, char **argv)
           static int mib[] = { CTL_HW, UNAME_PROCESSOR };
           if (sysctl (mib, 2, processor, &s, 0, 0) >= 0)
             element = processor;
-
-# ifdef __APPLE__
-          /* This kludge works around a bug in Mac OS X.  */
-          if (element == unknown)
-            {
-              cpu_type_t cputype;
-              size_t cs = sizeof cputype;
-              NXArchInfo const *ai;
-              if (sysctlbyname ("hw.cputype", &cputype, &cs, NULL, 0) == 0
-                  && (ai = NXGetArchInfoFromCpuType (cputype,
-                                                     CPU_SUBTYPE_MULTIPLE))
-                  != NULL)
-                element = ai->name;
-
-              /* Hack "safely" around the ppc vs. powerpc return value. */
-              if (cputype == CPU_TYPE_POWERPC
-                  && STRNCMP_LIT (element, "ppc") == 0)
-                element = "powerpc";
-            }
-# endif
         }
 #endif
       if (! (toprint == UINT_MAX && element == unknown))
-        print_element (element);
+        print_element (element, _("Processor"));
     }
 
   if (toprint & PRINT_HARDWARE_PLATFORM)
@@ -364,13 +405,14 @@ main (int argc, char **argv)
         }
 #endif
       if (! (toprint == UINT_MAX && element == unknown))
-        print_element (element);
+        print_element (element, _("Hardware platform"));
     }
 
   if (toprint & PRINT_OPERATING_SYSTEM)
-    print_element (HOST_OPERATING_SYSTEM);
+    print_element (HOST_OPERATING_SYSTEM, _("Operating system"));
 
-  putchar ('\n');
+  if (!labeled)
+    putchar ('\n');
 
   return EXIT_SUCCESS;
 }

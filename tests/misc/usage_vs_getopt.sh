@@ -1,7 +1,7 @@
 #!/bin/sh
 # Verify that all options mentioned in usage are recognized by getopt.
 
-# Copyright (C) 2017-2021 Free Software Foundation, Inc.
+# Copyright (C) 2017-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -26,7 +26,7 @@ checkprg () {
   rcexp=1
   case "$prg" in
     dir | ls | printenv | sort | tty | vdir ) rcexp=2 ;;
-    env | chroot | nice | nohup | stdbuf | timeout ) rcexp=125 ;;
+    env | chroot | nice | nohup | runcon | stdbuf | timeout ) rcexp=125 ;;
   esac
   # Write the pattern for a long, unknown option into a pattern file.
   o='thisoptiondoesnotexist'
@@ -70,7 +70,7 @@ checkprg () {
       # Else $prg should have complained about a missing argument.
       # Catch false positives.
       case "$prg/$opt" in
-        'pr/-COLUMN') continue;;
+        'pr/-COLS') continue;;
       esac
       # Replace $opt in stderr output by the neutral placeholder.
       # Handle both long and short option error messages.
@@ -87,7 +87,7 @@ for prg in $built_programs; do
     '[' | expr | stty )
       continue;;
     # Wrap some utilities known by the shell by env.
-    echo | false | kill | printf | pwd | test | true )
+    echo | false | kill | printf | pwd | sleep | test | true )
       prg="env $prg";;
   esac
   checkprg $prg

@@ -1,5 +1,5 @@
 /* cp-hash.c  -- file copying (hash search routines)
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -14,7 +14,7 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-   Written by Torbjorn Granlund, Sweden (tege@sics.se).
+   Written by Torbjörn Granlund, Sweden (tege@sics.se).
    Rewritten to use lib/hash.c by Jim Meyering.  */
 
 #include <config.h>
@@ -55,7 +55,7 @@ src_to_dest_hash (void const *x, size_t table_size)
   /* Ignoring the device number here should be fine.  */
   /* The cast to uintmax_t prevents negative remainders
      if st_ino is negative.  */
-  return (uintmax_t) p->st_ino % table_size;
+  return (uintmax_t) {p->st_ino} % table_size;
 }
 
 /* Compare two Src_to_dest entries.
@@ -65,7 +65,7 @@ src_to_dest_compare (void const *x, void const *y)
 {
   struct Src_to_dest const *a = x;
   struct Src_to_dest const *b = y;
-  return SAME_INODE (*a, *b) ? true : false;
+  return PSAME_INODE (a, b);
 }
 
 static void
@@ -109,7 +109,7 @@ src_to_dest_lookup (ino_t ino, dev_t dev)
 
 /* Add file NAME, copied from inode number INO and device number DEV,
    to the list of files we have copied.
-   Return NULL if inserted, otherwise non-NULL. */
+   Return NULL if inserted, otherwise a non-null pointer. */
 
 extern char *
 remember_copied (char const *name, ino_t ino, dev_t dev)
@@ -135,7 +135,7 @@ remember_copied (char const *name, ino_t ino, dev_t dev)
   if (ent_from_table != ent)
     {
       src_to_dest_free (ent);
-      return (char *) ent_from_table->name;
+      return ent_from_table->name;
     }
 
   /* New key;  insertion succeeded.  */
@@ -153,14 +153,3 @@ hash_init (void)
   if (src_to_dest == NULL)
     xalloc_die ();
 }
-
-/* Reset the hash structure in the global variable 'htab' to
-   contain no entries.  */
-
-#ifdef lint
-extern void
-forget_all (void)
-{
-  hash_free (src_to_dest);
-}
-#endif

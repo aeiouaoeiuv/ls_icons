@@ -16,6 +16,7 @@ chroot
 cksum
 comm
 coreutils
+coreutils_hardlinks
 cp
 csplit
 cut
@@ -87,6 +88,7 @@ shred
 shuf
 sleep
 sort
+speedlist.h
 split
 stat
 stdbuf

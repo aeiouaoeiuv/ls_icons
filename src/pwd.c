@@ -1,5 +1,5 @@
 /* pwd - print current directory
-   Copyright (C) 1994-2021 Free Software Foundation, Inc.
+   Copyright (C) 1994-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,8 +20,6 @@
 #include <sys/types.h>
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "quote.h"
 #include "root-dev-ino.h"
 #include "xgetcwd.h"
@@ -33,8 +31,8 @@
 
 struct file_name
 {
-  char *buf;
-  size_t n_alloc;
+  idx_t n_alloc;
+  char *buf COUNTED_BY (n_alloc);
   char *start;
 };
 
@@ -59,12 +57,16 @@ usage (int status)
 Print the full filename of the current working directory.\n\
 \n\
 "), stdout);
-      fputs (_("\
-  -L, --logical   use PWD from environment, even if it contains symlinks\n\
-  -P, --physical  avoid all symlinks\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -L, --logical\n\
+         use PWD from environment, even if it contains symlinks\n\
+"));
+      oputs (_("\
+  -P, --physical\n\
+         resolve all symlinks\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\n\
 If no option is specified, -P is assumed.\n\
 "), stdout);
@@ -86,12 +88,13 @@ file_name_init (void)
 {
   struct file_name *p = xmalloc (sizeof *p);
 
-  /* Start with a buffer larger than PATH_MAX, but beware of systems
+  /* Start with a buffer larger than likely file names, but beware of systems
      on which PATH_MAX is very large -- e.g., INT_MAX.  */
-  p->n_alloc = MIN (2 * PATH_MAX, 32 * 1024);
+  int init_alloc = 2 * MIN (PATH_MAX, 16 * 1024);
+  p->n_alloc = init_alloc;
 
-  p->buf = xmalloc (p->n_alloc);
-  p->start = p->buf + (p->n_alloc - 1);
+  p->buf = xmalloc (init_alloc);
+  p->start = p->buf + init_alloc - 1;
   p->start[0] = '\0';
   return p;
 }
@@ -100,21 +103,18 @@ file_name_init (void)
 static void
 file_name_prepend (struct file_name *p, char const *s, size_t s_len)
 {
-  size_t n_free = p->start - p->buf;
+  idx_t n_free = p->start - p->buf;
   if (n_free < 1 + s_len)
     {
-      size_t half = p->n_alloc + 1 + s_len;
-      /* Use xnmalloc+free rather than xnrealloc, since with the latter
+      /* Call xpalloc with NULL not p->buf, since with the latter
          we'd end up copying the data twice: once via realloc, then again
-         to align it with the end of the new buffer.  With xnmalloc, we
+         to align it with the end of the new buffer.  By passing NULL we
          copy it only once.  */
-      char *q = xnmalloc (2, half);
-      size_t n_used = p->n_alloc - n_free;
-      p->start = q + 2 * half - n_used;
-      memcpy (p->start, p->buf + n_free, n_used);
+      idx_t n_used = p->n_alloc - n_free;
+      char *buf = xpalloc (NULL, &p->n_alloc, 1 + s_len - n_free, -1, 1);
+      p->start = memcpy (buf + p->n_alloc - n_used, p->start, n_used);
       free (p->buf);
-      p->buf = q;
-      p->n_alloc = 2 * half;
+      p->buf = buf;
     }
 
   p->start -= 1 + s_len;
@@ -153,36 +153,29 @@ static void
 find_dir_entry (struct stat *dot_sb, struct file_name *file_name,
                 size_t parent_height)
 {
-  DIR *dirp;
-  int fd;
-  struct stat parent_sb;
-  bool use_lstat;
-  bool found;
-
-  dirp = opendir ("..");
+  DIR *dirp = opendir ("..");
   if (dirp == NULL)
-    die (EXIT_FAILURE, errno, _("cannot open directory %s"),
-         quote (nth_parent (parent_height)));
+    error (EXIT_FAILURE, errno, _("cannot open directory %s"),
+           quote (nth_parent (parent_height)));
 
-  fd = dirfd (dirp);
+  int fd = dirfd (dirp);
   if ((0 <= fd ? fchdir (fd) : chdir ("..")) < 0)
-    die (EXIT_FAILURE, errno, _("failed to chdir to %s"),
-         quote (nth_parent (parent_height)));
+    error (EXIT_FAILURE, errno, _("failed to chdir to %s"),
+           quote (nth_parent (parent_height)));
 
+  struct stat parent_sb;
   if ((0 <= fd ? fstat (fd, &parent_sb) : stat (".", &parent_sb)) < 0)
-    die (EXIT_FAILURE, errno, _("failed to stat %s"),
-         quote (nth_parent (parent_height)));
+    error (EXIT_FAILURE, errno, _("failed to stat %s"),
+           quote (nth_parent (parent_height)));
 
   /* If parent and child directory are on different devices, then we
      can't rely on d_ino for useful i-node numbers; use lstat instead.  */
-  use_lstat = (parent_sb.st_dev != dot_sb->st_dev);
+  bool use_lstat = (parent_sb.st_dev != dot_sb->st_dev);
 
-  found = false;
+  bool found = false;
   while (true)
     {
       struct dirent const *dp;
-      struct stat ent_sb;
-      ino_t ino;
 
       errno = 0;
       if ((dp = readdir_ignoring_dot_and_dotdot (dirp)) == NULL)
@@ -200,8 +193,9 @@ find_dir_entry (struct stat *dot_sb, struct file_name *file_name,
           break;
         }
 
-      ino = D_INO (dp);
+      ino_t ino = D_INO (dp);
 
+      struct stat ent_sb;
       if (ino == NOT_AN_INODE_NUMBER || use_lstat)
         {
           if (lstat (dp->d_name, &ent_sb) < 0)
@@ -229,14 +223,14 @@ find_dir_entry (struct stat *dot_sb, struct file_name *file_name,
     {
       /* Note that this diagnostic serves for both readdir
          and closedir failures.  */
-      die (EXIT_FAILURE, errno, _("reading directory %s"),
-           quote (nth_parent (parent_height)));
+      error (EXIT_FAILURE, errno, _("reading directory %s"),
+             quote (nth_parent (parent_height)));
     }
 
   if ( ! found)
-    die (EXIT_FAILURE, 0,
-         _("couldn't find directory entry in %s with matching i-node"),
-         quote (nth_parent (parent_height)));
+    error (EXIT_FAILURE, 0,
+           _("couldn't find directory entry in %s with matching i-node"),
+           quote (nth_parent (parent_height)));
 
   *dot_sb = parent_sb;
 }
@@ -270,19 +264,19 @@ robust_getcwd (struct file_name *file_name)
   size_t height = 1;
   struct dev_ino dev_ino_buf;
   struct dev_ino *root_dev_ino = get_root_dev_ino (&dev_ino_buf);
-  struct stat dot_sb;
 
   if (root_dev_ino == NULL)
-    die (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
-         quoteaf ("/"));
+    error (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
+           quoteaf ("/"));
 
+  struct stat dot_sb;
   if (stat (".", &dot_sb) < 0)
-    die (EXIT_FAILURE, errno, _("failed to stat %s"), quoteaf ("."));
+    error (EXIT_FAILURE, errno, _("failed to stat %s"), quoteaf ("."));
 
   while (true)
     {
       /* If we've reached the root, we're done.  */
-      if (SAME_INODE (dot_sb, *root_dev_ino))
+      if (PSAME_INODE (&dot_sb, root_dev_ino))
         break;
 
       find_dir_entry (&dot_sb, file_name, height++);
@@ -296,18 +290,15 @@ robust_getcwd (struct file_name *file_name)
 
 /* Return PWD from the environment if it is acceptable for 'pwd -L'
    output, otherwise NULL.  */
-static char *
+static char const *
 logical_getcwd (void)
 {
-  struct stat st1;
-  struct stat st2;
-  char *wd = getenv ("PWD");
-  char *p;
+  char const *wd = getenv ("PWD");
 
   /* Textual validation first.  */
   if (!wd || wd[0] != '/')
     return NULL;
-  p = wd;
+  char const *p = wd;
   while ((p = strstr (p, "/.")))
     {
       if (!p[2] || p[2] == '/'
@@ -317,7 +308,9 @@ logical_getcwd (void)
     }
 
   /* System call validation.  */
-  if (stat (wd, &st1) == 0 && stat (".", &st2) == 0 && SAME_INODE (st1, st2))
+  struct stat st1;
+  struct stat st2;
+  if (stat (wd, &st1) == 0 && stat (".", &st2) == 0 && psame_inode (&st1, &st2))
     return wd;
   return NULL;
 }
@@ -326,7 +319,6 @@ logical_getcwd (void)
 int
 main (int argc, char **argv)
 {
-  char *wd;
   /* POSIX requires a default of -L, but most scripts expect -P.
      Currently shells default to -L, while stand-alone
      pwd implementations default to -P.  */
@@ -368,7 +360,7 @@ main (int argc, char **argv)
 
   if (logical)
     {
-      wd = logical_getcwd ();
+      char const *wd = logical_getcwd ();
       if (wd)
         {
           puts (wd);
@@ -376,7 +368,7 @@ main (int argc, char **argv)
         }
     }
 
-  wd = xgetcwd ();
+  char *wd = xgetcwd ();
   if (wd != NULL)
     {
       puts (wd);

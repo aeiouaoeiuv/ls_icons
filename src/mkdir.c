@@ -1,5 +1,5 @@
 /* mkdir -- make directories
-   Copyright (C) 1990-2021 Free Software Foundation, Inc.
+   Copyright (C) 1990-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,8 +23,6 @@
 #include <selinux/label.h>
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "mkdir-p.h"
 #include "modechange.h"
 #include "prog-fprintf.h"
@@ -63,20 +61,31 @@ Create the DIRECTORY(ies), if they do not already exist.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-  -m, --mode=MODE   set file mode (as in chmod), not a=rwx - umask\n\
-  -p, --parents     no error if existing, make parent directories as needed,\n\
-                    with their file modes unaffected by any -m option.\n\
-  -v, --verbose     print a message for each created directory\n\
-"), stdout);
-      fputs (_("\
-  -Z                   set SELinux security context of each created directory\n\
-                         to the default type\n\
-      --context[=CTX]  like -Z, or if CTX is specified then set the SELinux\n\
-                         or SMACK security context to CTX\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -m, --mode=MODE\n\
+         set file mode (as in chmod), not a=rwx - umask\n\
+"));
+      oputs (_("\
+  -p, --parents\n\
+         no error if existing, make parent directories as needed,\n\
+         with their file modes unaffected by any -m option\n\
+"));
+      oputs (_("\
+  -v, --verbose\n\
+         print a message for each created directory\n\
+"));
+      oputs (_("\
+  -Z\n\
+         set SELinux security context of each created directory\n\
+         to the default type\n\
+"));
+      oputs (_("\
+      --context[=CTX]\n\
+         like -Z, or if CTX is specified then set the\n\
+         SELinux or SMACK security context to CTX\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -274,9 +283,9 @@ main (int argc, char **argv)
         ret = setfscreatecon (scontext);
 
       if (ret < 0)
-        die (EXIT_FAILURE, errno,
-             _("failed to set default file creation context to %s"),
-             quote (scontext));
+        error (EXIT_FAILURE, errno,
+               _("failed to set default file creation context to %s"),
+               quote (scontext));
     }
 
 
@@ -289,8 +298,8 @@ main (int argc, char **argv)
         {
           struct mode_change *change = mode_compile (specified_mode);
           if (!change)
-            die (EXIT_FAILURE, 0, _("invalid mode %s"),
-                 quote (specified_mode));
+            error (EXIT_FAILURE, 0, _("invalid mode %s"),
+                   quote (specified_mode));
           options.mode = mode_adjust (S_IRWXUGO, true, umask_value, change,
                                       &options.mode_bits);
           options.umask_self = umask_value & ~options.mode;

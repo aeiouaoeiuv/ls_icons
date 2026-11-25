@@ -1,5 +1,5 @@
 /* cat -- concatenate files and print on the standard output.
-   Copyright (C) 1988-2021 Free Software Foundation, Inc.
+   Copyright (C) 1988-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@
    * Usually much faster than other versions of cat, the difference
    is especially apparent when using the -v option.
 
-   By tege@sics.se, Torbjorn Granlund, advised by rms, Richard Stallman.  */
+   By tege@sics.se, Torbjörn Granlund, advised by rms, Richard Stallman.  */
 
 #include <config.h>
 
@@ -33,20 +33,25 @@
 #include <sys/ioctl.h>
 
 #include "system.h"
+#include "alignalloc.h"
+#include "assure.h"
 #include "ioblksize.h"
-#include "die.h"
-#include "error.h"
 #include "fadvise.h"
 #include "full-write.h"
-#include "safe-read.h"
+#include "isapipe.h"
+#include "splice.h"
+#include "unistd--.h"
 #include "xbinary-io.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "cat"
 
 #define AUTHORS \
-  proper_name ("Torbjorn Granlund"), \
+  proper_name_lite ("Torbjorn Granlund", "Torbj\303\266rn Granlund"), \
   proper_name ("Richard M. Stallman")
+
+/* Initial read size for small files.  */
+#define INITIAL_READ_SIZE 4096
 
 /* Name of input file.  May be "-".  */
 static char const *infile;
@@ -98,23 +103,38 @@ Concatenate FILE(s) to standard output.\n\
 
       emit_stdin_note ();
 
-      fputs (_("\
-\n\
+      oputs (_("\
   -A, --show-all           equivalent to -vET\n\
+"));
+      oputs (_("\
   -b, --number-nonblank    number nonempty output lines, overrides -n\n\
+"));
+      oputs (_("\
   -e                       equivalent to -vE\n\
-  -E, --show-ends          display $ at end of each line\n\
+"));
+      oputs (_("\
+  -E, --show-ends          display $ or ^M$ at end of each line\n\
+"));
+      oputs (_("\
   -n, --number             number all output lines\n\
+"));
+      oputs (_("\
   -s, --squeeze-blank      suppress repeated empty output lines\n\
-"), stdout);
-      fputs (_("\
+"));
+      oputs (_("\
   -t                       equivalent to -vT\n\
+"));
+      oputs (_("\
   -T, --show-tabs          display TAB characters as ^I\n\
+"));
+      oputs (_("\
   -u                       (ignored)\n\
+"));
+      oputs (_("\
   -v, --show-nonprinting   use ^ and M- notation, except for LFD and TAB\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       printf (_("\
 \n\
 Examples:\n\
@@ -140,6 +160,7 @@ next_line_num (void)
       *endp-- = '0';
     }
   while (endp >= line_num_start);
+
   if (line_num_start > line_buf)
     *--line_num_start = '1';
   else
@@ -148,47 +169,39 @@ next_line_num (void)
     line_num_print--;
 }
 
-/* Plain cat.  Copies the file behind 'input_desc' to STDOUT_FILENO.
-   Return true if successful.  */
+/* Plain cat.  Copy the file behind 'input_desc' to STDOUT_FILENO.
+   BUF (of size BUFSIZE) is the I/O buffer, used by reads and writes.
+   If INITIAL, return after a full buffer.
+   Return 1 at EOF, 0 to try bulk copying, -1 on error.  */
 
-static bool
-simple_cat (
-     /* Pointer to the buffer, used by reads and writes.  */
-     char *buf,
-
-     /* Number of characters preferably read or written by each read and write
-        call.  */
-     size_t bufsize)
+static int
+simple_cat (char *buf, idx_t bufsize, bool initial)
 {
-  /* Actual number of characters read, and therefore written.  */
-  size_t n_read;
-
   /* Loop until the end of the file.  */
 
   while (true)
     {
       /* Read a block of input.  */
 
-      n_read = safe_read (input_desc, buf, bufsize);
-      if (n_read == SAFE_READ_ERROR)
+      ssize_t n_read = read (input_desc, buf, bufsize);
+      if (n_read < 0)
         {
           error (0, errno, "%s", quotef (infile));
-          return false;
+          return -1;
         }
 
       /* End of this file?  */
 
       if (n_read == 0)
-        return true;
+        return 1;
 
       /* Write this block out.  */
 
-      {
-        /* The following is ok, since we know that 0 < n_read.  */
-        size_t n = n_read;
-        if (full_write (STDOUT_FILENO, buf, n) != n)
-          die (EXIT_FAILURE, errno, _("write error"));
-      }
+      if (full_write (STDOUT_FILENO, buf, n_read) != n_read)
+        write_error ();
+
+      if (initial && n_read == bufsize)
+        return 0;
     }
 }
 
@@ -199,16 +212,21 @@ simple_cat (
 static inline void
 write_pending (char *outbuf, char **bpout)
 {
-  size_t n_write = *bpout - outbuf;
+  idx_t n_write = *bpout - outbuf;
   if (0 < n_write)
     {
       if (full_write (STDOUT_FILENO, outbuf, n_write) != n_write)
-        die (EXIT_FAILURE, errno, _("write error"));
+        write_error ();
       *bpout = outbuf;
     }
 }
 
-/* Cat the file behind INPUT_DESC to the file behind OUTPUT_DESC.
+/* Copy the file behind 'input_desc' to STDOUT_FILENO.
+   Use INBUF and read INSIZE with each call,
+   and OUTBUF and write OUTSIZE with each call.
+   (The buffers are a bit larger than the I/O sizes.)
+   The remaining boolean args say what 'cat' options to use.
+
    Return true if successful.
    Called if any option more than -u was specified.
 
@@ -216,42 +234,12 @@ write_pending (char *outbuf, char **bpout)
    an explicit test for buffer end unnecessary.  */
 
 static bool
-cat (
-     /* Pointer to the beginning of the input buffer.  */
-     char *inbuf,
-
-     /* Number of characters read in each read call.  */
-     size_t insize,
-
-     /* Pointer to the beginning of the output buffer.  */
-     char *outbuf,
-
-     /* Number of characters written by each write call.  */
-     size_t outsize,
-
-     /* Variables that have values according to the specified options.  */
-     bool show_nonprinting,
-     bool show_tabs,
-     bool number,
-     bool number_nonblank,
-     bool show_ends,
-     bool squeeze_blank)
+cat (char *inbuf, idx_t insize, char *outbuf, idx_t outsize,
+     bool show_nonprinting, bool show_tabs, bool number, bool number_nonblank,
+     bool show_ends, bool squeeze_blank)
 {
   /* Last character read from the input buffer.  */
   unsigned char ch;
-
-  /* Pointer to the next character in the input buffer.  */
-  char *bpin;
-
-  /* Pointer to the first non-valid byte in the input buffer, i.e., the
-     current end of the buffer.  */
-  char *eob;
-
-  /* Pointer to the position where the next character shall be written.  */
-  char *bpout;
-
-  /* Number of characters read by the last read call.  */
-  size_t n_read;
 
   /* Determines how many consecutive newlines there have been in the
      input.  0 newlines makes NEWLINES -1, 1 newline makes NEWLINES 1,
@@ -269,10 +257,15 @@ cat (
   /* The inbuf pointers are initialized so that BPIN > EOB, and thereby input
      is read immediately.  */
 
-  eob = inbuf;
-  bpin = eob + 1;
+  /* Pointer to the first non-valid byte in the input buffer, i.e., the
+     current end of the buffer.  */
+  char *eob = inbuf;
 
-  bpout = outbuf;
+  /* Pointer to the next character in the input buffer.  */
+  char *bpin = eob + 1;
+
+  /* Pointer to the position where the next character shall be written.  */
+  char *bpout = outbuf;
 
   while (true)
     {
@@ -283,11 +276,11 @@ cat (
           if (outbuf + outsize <= bpout)
             {
               char *wp = outbuf;
-              size_t remaining_bytes;
+              idx_t remaining_bytes;
               do
                 {
                   if (full_write (STDOUT_FILENO, wp, outsize) != outsize)
-                    die (EXIT_FAILURE, errno, _("write error"));
+                    write_error ();
                   wp += outsize;
                   remaining_bytes = bpout - wp;
                 }
@@ -342,8 +335,8 @@ cat (
 
               /* Read more input into INBUF.  */
 
-              n_read = safe_read (input_desc, inbuf, insize);
-              if (n_read == SAFE_READ_ERROR)
+              ssize_t n_read = read (input_desc, inbuf, insize);
+              if (n_read < 0)
                 {
                   error (0, errno, "%s", quotef (infile));
                   write_pending (outbuf, &bpout);
@@ -528,42 +521,198 @@ cat (
     }
 }
 
+/* Copy data from input to output using copy_file_range if possible.
+   Return 1 if successful, 0 if ordinary read+write should be tried,
+   -1 if a serious problem has been diagnosed.  */
+
+static int
+copy_cat (void)
+{
+  /* Copy at most COPY_MAX bytes at a time; this is min
+     (SSIZE_MAX, SIZE_MAX) truncated to a value that is
+     surely aligned well.  */
+  ssize_t copy_max = MIN (SSIZE_MAX, SIZE_MAX) >> 30 << 30;
+
+  /* copy_file_range does not support some cases, and it
+     incorrectly returns 0 when reading from the proc file
+     system on the Linux kernel through at least 5.6.19 (2020),
+     so fall back on read+write if the copy_file_range is
+     unsupported or the input file seems empty.  */
+
+  for (bool some_copied = false; ; some_copied = true)
+    switch (copy_file_range (input_desc, NULL, STDOUT_FILENO, NULL,
+                             copy_max, 0))
+      {
+      case 0:
+        return some_copied;
+
+      case -1:
+        if (errno == ENOSYS || is_ENOTSUP (errno) || errno == EINVAL
+            || errno == EBADF || errno == EXDEV || errno == ETXTBSY
+            || errno == EPERM || errno == EFBIG)
+          return 0;
+        error (0, errno, "%s", quotef (infile));
+        return -1;
+      }
+}
+
+#if HAVE_SPLICE
+
+/* If PIPEFD[0] is a non-negative value, we have an open pipe from a
+   previous call to splice_cat.  At the start of splice_cat the pipe
+   will always be empty.  Use splice_cat_close on error or end of
+   program.  */
+static int pipefd[2] = { -1, -1 };
+
+/* The size of the pipe referred to by PIPEFD.  */
+static idx_t pipefd_pipe_size = 0;
+
+/* Close PIDEFD[0] and PIPEFD[1] if not -1, reset pipefd_pipe_size.  */
+static void
+splice_cat_close (void)
+{
+  if (pipefd[0] >= 0)
+    {
+      close (pipefd[0]);
+      close (pipefd[1]);
+    }
+
+  pipefd[0] = pipefd[1] = -1;
+  pipefd_pipe_size = 0;
+}
+
+#else
+
+/* No splice no close.  */
+static void splice_cat_close (void) { }
+
+#endif
+
+/* Copy data from input to output using splice if possible.
+   Return 1 if successful, 0 if ordinary read+write should be tried,
+   -1 if a serious problem has been diagnosed.  */
+
+static int
+splice_cat (void)
+{
+  bool some_copied = false;
+  bool in_ok = true;
+  bool out_ok = true;
+
+#if HAVE_SPLICE
+
+  /* Create an intermediate pipe if it is not already open.
+     Even if both input and output are pipes,
+     so that read and write errors can be distinguished.  */
+  if (pipefd[0] < 0)
+    {
+      if (pipe (pipefd) < 0)
+        return false;
+      pipefd_pipe_size = increase_pipe_size (pipefd[1]);
+    }
+
+  /* Increase the size of the pipe referred to by standard output.  */
+  static int stdout_is_pipe = -1;
+  static idx_t stdout_pipe_size = 0;
+  if (stdout_is_pipe == -1)
+    {
+      stdout_is_pipe = 0 < isapipe (STDOUT_FILENO);
+      if (stdout_is_pipe)
+        stdout_pipe_size = increase_pipe_size (STDOUT_FILENO);
+    }
+
+  idx_t pipe_size = MAX (pipefd_pipe_size, stdout_pipe_size);
+
+  while (true)
+    {
+      ssize_t bytes_read = splice (input_desc, NULL, pipefd[1], NULL,
+                                   pipe_size, 0);
+      /* If we successfully splice'd input previously, assume that any
+         subsequent error is fatal.  If not, then fall back to read
+         and write.  */
+      in_ok = 0 <= bytes_read || ! some_copied;
+      if (bytes_read == 0)
+        some_copied = true;  /* Indicate splice complete.  */
+      if (bytes_read <= 0)
+        goto done;
+      /* We need to drain the intermediate pipe to standard output.  */
+      while (0 < bytes_read)
+        {
+          ssize_t bytes_written = splice (pipefd[0], NULL, STDOUT_FILENO, NULL,
+                                          pipe_size, 0);
+          /* If we successfully splice'd output, assume any subsequent
+             error is fatal.  If not, than drain the intermediate pipe and
+             continue using read and write.  */
+          if (bytes_written < 0)
+            {
+              if (some_copied)
+                out_ok = false;
+              else
+                {
+                  char buf[BUFSIZ];
+                  while (0 < bytes_read)
+                    {
+                      ssize_t count = MIN (bytes_read, sizeof buf);
+                      ssize_t n_read = read (pipefd[0], buf, count);
+                      /* Failure not associated with in or out.  */
+                      in_ok = out_ok = 0 <= n_read;
+                      if (n_read <= 0)
+                        goto done;
+                      if (full_write (STDOUT_FILENO, buf, n_read) != n_read)
+                        write_error ();
+                      bytes_read -= n_read;
+                    }
+                }
+            }
+          if (bytes_written <= 0)
+            goto done;
+          some_copied = true;
+          bytes_read -= bytes_written;
+        }
+    }
+
+ done:
+  if (! in_ok && ! out_ok)
+    {
+      /* Recreate the pipe on internal error.  */
+      int saved_errno = errno;
+      splice_cat_close ();
+      errno = saved_errno;
+      error (0, errno, "%s", _("splice error"));
+    }
+  else if (! in_ok)
+    error (0, errno, "%s", quotef (infile));
+  else if (! out_ok)
+    write_error ();
+#endif
+
+  return (in_ok && out_ok) ? some_copied : -1;
+}
+
+/* Reuse an aligned buffer across inputs, growing it only as needed.  */
+
+static char *
+ensure_buf_size (char *buf, idx_t *buf_alloc, idx_t alignment, idx_t size)
+{
+  affirm (buf != NULL || *buf_alloc < size);
+
+  if (*buf_alloc < size)
+    {
+      alignfree (buf);
+      buf = xalignalloc (alignment, size);
+      *buf_alloc = size;
+    }
+
+  return buf;
+}
+
 int
 main (int argc, char **argv)
 {
-  /* Optimal size of i/o operations of output.  */
-  size_t outsize;
-
-  /* Optimal size of i/o operations of input.  */
-  size_t insize;
-
-  size_t page_size = getpagesize ();
-
-  /* Pointer to the input buffer.  */
-  char *inbuf;
-
-  /* Pointer to the output buffer.  */
-  char *outbuf;
-
-  bool ok = true;
-  int c;
-
-  /* Index in argv to processed argument.  */
-  int argind;
-
-  /* Device number of the output (file or whatever).  */
-  dev_t out_dev;
-
-  /* I-node number of the output.  */
-  ino_t out_ino;
-
-  /* True if the output is a regular file.  */
-  bool out_isreg;
-
   /* Nonzero if we have ever read standard input.  */
   bool have_read_stdin = false;
 
-  struct stat stat_buf;
+  struct stat ostat_buf;
 
   /* Variables that are set according to the specified options.  */
   bool number = false;
@@ -602,6 +751,7 @@ main (int argc, char **argv)
 
   /* Parse command line options.  */
 
+  int c;
   while ((c = getopt_long (argc, argv, "benstuvAET", long_options, NULL))
          != -1)
     {
@@ -663,13 +813,17 @@ main (int argc, char **argv)
 
   /* Get device, i-node number, and optimal blocksize of output.  */
 
-  if (fstat (STDOUT_FILENO, &stat_buf) < 0)
-    die (EXIT_FAILURE, errno, _("standard output"));
+  if (fstat (STDOUT_FILENO, &ostat_buf) < 0)
+    error (EXIT_FAILURE, errno, _("standard output"));
 
-  outsize = io_blksize (stat_buf);
-  out_dev = stat_buf.st_dev;
-  out_ino = stat_buf.st_ino;
-  out_isreg = S_ISREG (stat_buf.st_mode) != 0;
+  /* Optimal size of i/o operations of output.  */
+  idx_t outsize = io_blksize (&ostat_buf);
+
+  /* Device, I-node number and lazily-acquired flags of the output.  */
+  int out_flags = -2;
+
+  /* True if the output is a regular file.  */
+  bool out_isreg = S_ISREG (ostat_buf.st_mode) != 0;
 
   if (! (number || show_ends || squeeze_blank))
     {
@@ -677,19 +831,24 @@ main (int argc, char **argv)
       xset_binary_mode (STDOUT_FILENO, O_BINARY);
     }
 
-  /* Check if any of the input files are the same as the output file.  */
-
   /* Main loop.  */
 
   infile = "-";
-  argind = optind;
+  int argind = optind;
+  bool ok = true;
+  idx_t page_size = getpagesize ();
+  char *inbuf = NULL;
+  char *outbuf = NULL;
+  idx_t inbuf_alloc = 0;
+  idx_t outbuf_alloc = 0;
 
   do
     {
       if (argind < argc)
         infile = argv[argind];
 
-      if (STREQ (infile, "-"))
+      bool reading_stdin = streq (infile, "-");
+      if (reading_stdin)
         {
           have_read_stdin = true;
           input_desc = STDIN_FILENO;
@@ -707,46 +866,95 @@ main (int argc, char **argv)
             }
         }
 
-      if (fstat (input_desc, &stat_buf) < 0)
+      struct stat istat_buf;
+      if (fstat (input_desc, &istat_buf) < 0)
         {
           error (0, errno, "%s", quotef (infile));
           ok = false;
           goto contin;
         }
-      insize = io_blksize (stat_buf);
+
+      /* Optimal size of i/o operations of input.  */
+      idx_t insize = io_blksize (&istat_buf);
 
       fdadvise (input_desc, 0, 0, FADVISE_SEQUENTIAL);
 
-      /* Don't copy a nonempty regular file to itself, as that would
-         merely exhaust the output device.  It's better to catch this
-         error earlier rather than later.  */
+      /* Don't copy a file to itself if that would merely exhaust the
+         output device.  It's better to catch this error earlier
+         rather than later.  */
 
-      if (out_isreg
-          && stat_buf.st_dev == out_dev && stat_buf.st_ino == out_ino
-          && lseek (input_desc, 0, SEEK_CUR) < stat_buf.st_size)
+      if (! (S_ISFIFO (istat_buf.st_mode) || S_ISSOCK (istat_buf.st_mode)
+             || S_TYPEISSHM (&istat_buf) || S_TYPEISTMO (&istat_buf))
+          && ! (S_TYPEISSHM (&ostat_buf) || S_TYPEISTMO (&ostat_buf))
+          && SAME_INODE (istat_buf, ostat_buf))
         {
-          error (0, 0, _("%s: input file is output file"), quotef (infile));
-          ok = false;
-          goto contin;
+          off_t in_pos = lseek (input_desc, 0, SEEK_CUR);
+          if (0 <= in_pos)
+            {
+              if (out_flags < -1)
+                out_flags = fcntl (STDOUT_FILENO, F_GETFL);
+              int whence = (0 <= out_flags && out_flags & O_APPEND
+                            ? SEEK_END : SEEK_CUR);
+              if (in_pos < lseek (STDOUT_FILENO, 0, whence))
+                {
+                  error (0, 0, _("%s: input file is output file"),
+                         quotef (infile));
+                  ok = false;
+                  goto contin;
+                }
+            }
         }
 
       /* Select which version of 'cat' to use.  If any format-oriented
-         options were given use 'cat'; otherwise use 'simple_cat'.  */
+         options were given use 'cat'; if not, use 'copy_cat' if it
+         works, 'simple_cat' otherwise.  */
 
       if (! (number || show_ends || show_nonprinting
              || show_tabs || squeeze_blank))
         {
-          insize = MAX (insize, outsize);
-          inbuf = xmalloc (insize + page_size - 1);
-
-          ok &= simple_cat (ptr_align (inbuf, page_size), insize);
+          int copy_cat_status = 0;
+          if (usable_st_size (&istat_buf)
+              && istat_buf.st_size <= INITIAL_READ_SIZE)
+            {
+              /* Use smaller buf as read(,,large) can induce large allocations
+                 with /proc/sys files files as of Linux 7.2 at least.
+                 Use a page aligned buffer to better support direct I/O.  */
+              inbuf = ensure_buf_size (inbuf, &inbuf_alloc,
+                                       page_size, INITIAL_READ_SIZE);
+              copy_cat_status = simple_cat (inbuf, INITIAL_READ_SIZE, true);
+            }
+          if (copy_cat_status == 0 && out_isreg && S_ISREG (istat_buf.st_mode))
+            copy_cat_status = copy_cat ();
+          if (copy_cat_status != 0)
+            ok &= 0 < copy_cat_status;
+          else
+            {
+              /* Note 32768 was determined as the limit when splice
+                 starts to have a performance advantage.
+                 It also excludes zero length files which may not
+                 be compatible with splice in some edge cases.  */
+              int splice_cat_status = ((usable_st_size (&istat_buf)
+                                        && istat_buf.st_size <= 32768)
+                                       ? 0 : splice_cat ());
+              if (splice_cat_status != 0)
+                ok &= 0 < splice_cat_status;
+              else
+                {
+                  insize = MAX (insize, outsize);
+                  inbuf = ensure_buf_size (inbuf, &inbuf_alloc,
+                                           page_size, insize);
+                  ok &= 0 < simple_cat (inbuf, insize, false);
+                }
+            }
         }
       else
         {
-          inbuf = xmalloc (insize + 1 + page_size - 1);
+          /* Allocate, with an extra byte for a newline sentinel.  */
+          inbuf = ensure_buf_size (inbuf, &inbuf_alloc,
+                                   page_size, insize + 1);
 
           /* Why are
-             (OUTSIZE - 1 + INSIZE * 4 + LINE_COUNTER_BUF_LEN + PAGE_SIZE - 1)
+             (OUTSIZE - 1 + INSIZE * 4 + LINE_COUNTER_BUF_LEN * 2)
              bytes allocated for the output buffer?
 
              A test whether output needs to be written is done when the input
@@ -760,28 +968,31 @@ main (int argc, char **argv)
              newline, a line number may be written (according to the given
              options) as the first thing in the output buffer. (Done after the
              new input is read, but before processing of the input begins.)
-             A line number requires seldom more than LINE_COUNTER_BUF_LEN
-             positions.
+
+             If the current buffered input starts with an empty line, its line
+             number, a '$' if -E is in use, and a new line are written, then the
+             number of the subsequent line, and then the (INSIZE - 1) remaining
+             buffered characters.  Therefore, we may have two line numbers
+             pending, each requiring (LINE_COUNTER_BUF_LEN - 1) bytes.
 
              Align the output buffer to a page size boundary, for efficiency
-             on some paging implementations, so add PAGE_SIZE - 1 bytes to the
-             request to make room for the alignment.  */
+             on some paging implementations.  */
 
-          outbuf = xmalloc (outsize - 1 + insize * 4 + LINE_COUNTER_BUF_LEN
-                            + page_size - 1);
+          idx_t bufsize;
+          if (ckd_mul (&bufsize, insize, 4)
+              || ckd_add (&bufsize, bufsize, outsize)
+              || ckd_add (&bufsize, bufsize, LINE_COUNTER_BUF_LEN * 2 - 1))
+            xalloc_die ();
+          outbuf = ensure_buf_size (outbuf, &outbuf_alloc,
+                                    page_size, bufsize);
 
-          ok &= cat (ptr_align (inbuf, page_size), insize,
-                     ptr_align (outbuf, page_size), outsize, show_nonprinting,
+          ok &= cat (inbuf, insize, outbuf, outsize, show_nonprinting,
                      show_tabs, number, number_nonblank, show_ends,
                      squeeze_blank);
-
-          free (outbuf);
         }
 
-      free (inbuf);
-
     contin:
-      if (!STREQ (infile, "-") && close (input_desc) < 0)
+      if (!reading_stdin && close (input_desc) < 0)
         {
           error (0, errno, "%s", quotef (infile));
           ok = false;
@@ -792,11 +1003,18 @@ main (int argc, char **argv)
   if (pending_cr)
     {
       if (full_write (STDOUT_FILENO, "\r", 1) != 1)
-        die (EXIT_FAILURE, errno, _("write error"));
+        write_error ();
     }
 
+#ifdef lint
+  alignfree (outbuf);
+  alignfree (inbuf);
+#endif
+
+  splice_cat_close ();  /* Avoid warnings from FD trackers.  */
+
   if (have_read_stdin && close (STDIN_FILENO) < 0)
-    die (EXIT_FAILURE, errno, _("closing standard input"));
+    error (EXIT_FAILURE, errno, _("closing standard input"));
 
   return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

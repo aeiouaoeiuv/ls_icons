@@ -1,5 +1,5 @@
 /* realpath - print the resolved path
-   Copyright (C) 2011-2021 Free Software Foundation, Inc.
+   Copyright (C) 2011-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -21,16 +21,15 @@
 #include <stdio.h>
 #include <sys/types.h>
 
+#include "argmatch.h"  /* argmatch($QUOTING_STYLE).  */
 #include "system.h"
 #include "canonicalize.h"
-#include "die.h"
-#include "error.h"
 #include "relpath.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "realpath"
 
-#define AUTHORS proper_name ("Padraig Brady")
+#define AUTHORS proper_name_lite ("Padraig Brady", "P\303\241draig Brady")
 
 enum
 {
@@ -41,11 +40,13 @@ enum
 static bool verbose = true;
 static bool logical;
 static bool use_nuls;
+static bool quote_output;
 static char const *can_relative_to;
 static char const *can_relative_base;
 
 static struct option const longopts[] =
 {
+  {"canonicalize", no_argument, NULL, 'E'},
   {"canonicalize-existing", no_argument, NULL, 'e'},
   {"canonicalize-missing", no_argument, NULL, 'm'},
   {"relative-to", required_argument, NULL, RELATIVE_TO_OPTION},
@@ -70,24 +71,42 @@ usage (int status)
     {
       printf (_("Usage: %s [OPTION]... FILE...\n"), program_name);
       fputs (_("\
-Print the resolved absolute file name;\n\
-all but the last component must exist\n\
-\n\
+Print the resolved absolute file name.\n\
 "), stdout);
-      fputs (_("\
+      oputs (_("\
+  -E, --canonicalize           all but the last component must exist (default)\
+\n\
+"));
+      oputs (_("\
   -e, --canonicalize-existing  all components of the path must exist\n\
+"));
+      oputs (_("\
   -m, --canonicalize-missing   no path components need exist or be a directory\
 \n\
+"));
+      oputs (_("\
   -L, --logical                resolve '..' components before symlinks\n\
+"));
+      oputs (_("\
   -P, --physical               resolve symlinks as encountered (default)\n\
+"));
+      oputs (_("\
   -q, --quiet                  suppress most error messages\n\
+"));
+      oputs (_("\
       --relative-to=DIR        print the resolved path relative to DIR\n\
+"));
+      oputs (_("\
       --relative-base=DIR      print absolute paths unless paths below DIR\n\
+"));
+      oputs (_("\
   -s, --strip, --no-symlinks   don't expand symlinks\n\
+"));
+      oputs (_("\
   -z, --zero                   end each output line with NUL, not newline\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -110,7 +129,8 @@ realpath_canon (char const *fname, int can_mode)
 }
 
 /* Test whether canonical prefix is parent or match of path.  */
-static bool _GL_ATTRIBUTE_PURE
+ATTRIBUTE_PURE
+static bool
 path_prefix (char const *prefix, char const *path)
 {
   /* We already know prefix[0] and path[0] are '/'.  */
@@ -142,8 +162,36 @@ isdir (char const *path)
 {
   struct stat sb;
   if (stat (path, &sb) != 0)
-    die (EXIT_FAILURE, errno, _("cannot stat %s"), quoteaf (path));
+    error (EXIT_FAILURE, errno, _("cannot stat %s"), quoteaf (path));
   return S_ISDIR (sb.st_mode);
+}
+
+static void
+print_path (char const *path)
+{
+  fputs (quote_output ? quoteN (path) : path, stdout);
+}
+
+/* Print CAN_FNAME relative to can_relative_to, quoting the complete
+   relative file name when appropriate.  */
+static bool
+print_relative_path (char const *can_fname)
+{
+  if (!quote_output)
+    return relpath (can_fname, can_relative_to, NULL, 0);
+
+  size_t size;
+  if (ckd_mul (&size, strlen (can_relative_to), 2)
+      || ckd_add (&size, size, strlen (can_fname))
+      || ckd_add (&size, size, 1))
+    xalloc_die ();
+
+  char *relative_path = xmalloc (size);
+  bool success = relpath (can_fname, can_relative_to, relative_path, size);
+  if (success)
+    print_path (relative_path);
+  free (relative_path);
+  return success;
 }
 
 static bool
@@ -159,12 +207,15 @@ process_path (char const *fname, int can_mode)
 
   if (!can_relative_to
       || (can_relative_base && !path_prefix (can_relative_base, can_fname))
-      || (can_relative_to && !relpath (can_fname, can_relative_to, NULL, 0)))
-    fputs (can_fname, stdout);
+      || (can_relative_to && !print_relative_path (can_fname)))
+    print_path (can_fname);
 
   putchar (use_nuls ? '\0' : '\n');
 
   free (can_fname);
+
+  if (ferror (stdout))
+    write_error ();
 
   return true;
 }
@@ -187,11 +238,15 @@ main (int argc, char **argv)
 
   while (true)
     {
-      int c = getopt_long (argc, argv, "eLmPqsz", longopts, NULL);
+      int c = getopt_long (argc, argv, "EeLmPqsz", longopts, NULL);
       if (c == -1)
         break;
       switch (c)
         {
+        case 'E':
+          can_mode &= ~CAN_MODE_MASK;
+          can_mode |= CAN_ALL_BUT_LAST;
+          break;
         case 'e':
           can_mode &= ~CAN_MODE_MASK;
           can_mode |= CAN_EXISTING;
@@ -237,6 +292,18 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
+  if (! use_nuls && isatty (STDOUT_FILENO))
+    {
+      int qs = getenv_quoting_style ();
+      if (qs < 0)
+        qs = shell_escape_quoting_style;
+      if (qs != literal_quoting_style)
+        {
+          set_quoting_style (NULL, qs);
+          quote_output = true;
+        }
+    }
+
   if (relative_base && !relative_to)
     relative_to = relative_base;
 
@@ -245,9 +312,9 @@ main (int argc, char **argv)
     {
       can_relative_to = realpath_canon (relative_to, can_mode);
       if (!can_relative_to)
-        die (EXIT_FAILURE, errno, "%s", quotef (relative_to));
+        error (EXIT_FAILURE, errno, "%s", quotef (relative_to));
       if (need_dir && !isdir (can_relative_to))
-        die (EXIT_FAILURE, ENOTDIR, "%s", quotef (relative_to));
+        error (EXIT_FAILURE, ENOTDIR, "%s", quotef (relative_to));
     }
   if (relative_base == relative_to)
     can_relative_base = can_relative_to;
@@ -255,9 +322,9 @@ main (int argc, char **argv)
     {
       char *base = realpath_canon (relative_base, can_mode);
       if (!base)
-        die (EXIT_FAILURE, errno, "%s", quotef (relative_base));
+        error (EXIT_FAILURE, errno, "%s", quotef (relative_base));
       if (need_dir && !isdir (base))
-        die (EXIT_FAILURE, ENOTDIR, "%s", quotef (relative_base));
+        error (EXIT_FAILURE, ENOTDIR, "%s", quotef (relative_base));
       /* --relative-to is a no-op if it does not have --relative-base
            as a prefix */
       if (path_prefix (base, can_relative_to))

@@ -1,5 +1,5 @@
 /* relpath - print the relative path
-   Copyright (C) 2012-2021 Free Software Foundation, Inc.
+   Copyright (C) 2012-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,7 +18,6 @@
 
 #include <config.h>
 
-#include "error.h"
 #include "system.h"
 #include "relpath.h"
 
@@ -26,7 +25,8 @@
 /* Return the length of the longest common prefix
    of canonical PATH1 and PATH2, ensuring only full path components
    are matched.  Return 0 on no match.  */
-static int _GL_ATTRIBUTE_PURE
+ATTRIBUTE_PURE
+static int
 path_common_prefix (char const *path1, char const *path2)
 {
   int i = 0;
@@ -58,12 +58,12 @@ path_common_prefix (char const *path1, char const *path2)
 }
 
 /* Either output STR to stdout or
-   if *PBUF is not NULL then append STR to *PBUF
+   if *PBUF is not null then append STR to *PBUF
    and update *PBUF to point to the end of the buffer
    and adjust *PLEN to reflect the remaining space.
    Return TRUE on failure.  */
 static bool
-buffer_or_output (const char* str, char **pbuf, size_t *plen)
+buffer_or_output (char const *str, char **pbuf, size_t *plen)
 {
   if (*pbuf)
     {
@@ -83,7 +83,7 @@ buffer_or_output (const char* str, char **pbuf, size_t *plen)
 }
 
 /* Output the relative representation if possible.
-   If BUF is non-NULL, write to that buffer rather than to stdout.  */
+   If BUF is non-null, write to that buffer rather than to stdout.  */
 bool
 relpath (char const *can_fname, char const *can_reldir, char *buf, size_t len)
 {

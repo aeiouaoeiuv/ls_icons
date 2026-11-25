@@ -1,6 +1,6 @@
 /* Root device and inode number checking.
 
-   Copyright (C) 2003-2021 Free Software Foundation, Inc.
+   Copyright (C) 2003-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,18 +22,18 @@
 # include "same-inode.h"
 
 struct dev_ino *
-get_root_dev_ino (struct dev_ino *root_d_i);
+get_root_dev_ino (struct dev_ino *root_d_i) _GL_ATTRIBUTE_NONNULL ();
 
 /* These macros are common to the programs that support the
    --preserve-root and --no-preserve-root options.  */
 
 # define ROOT_DEV_INO_CHECK(Root_dev_ino, Dir_statbuf) \
-    (Root_dev_ino && SAME_INODE (*Dir_statbuf, *Root_dev_ino))
+    (Root_dev_ino && PSAME_INODE (Dir_statbuf, Root_dev_ino))
 
 # define ROOT_DEV_INO_WARN(Dirname)					\
   do									\
     {									\
-      if (STREQ (Dirname, "/"))						\
+      if (streq (Dirname, "/"))						\
         error (0, 0, _("it is dangerous to operate recursively on %s"),	\
                quoteaf (Dirname));					\
       else								\

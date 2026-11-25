@@ -1,5 +1,5 @@
 /* chmod -- change permission modes of files
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,11 +22,12 @@
 #include <sys/types.h>
 
 #include "system.h"
+#include "assure.h"
 #include "dev-ino.h"
-#include "die.h"
-#include "error.h"
 #include "filemode.h"
+#include "fts-missing.h"
 #include "ignore-value.h"
+#include "issymlinkat.h"
 #include "modechange.h"
 #include "quote.h"
 #include "root-dev-ino.h"
@@ -39,13 +40,20 @@
   proper_name ("David MacKenzie"), \
   proper_name ("Jim Meyering")
 
+#if defined AT_EMPTY_PATH \
+    && HAVE_WORKING_O_NOFOLLOW && HAVE_WORKING_FSTAT_O_PATH
+# define USE_DESCRIPTOR_CHMOD 1
+#else
+# define USE_DESCRIPTOR_CHMOD 0
+#endif
+
 struct change_status
 {
   enum
     {
       CH_NO_STAT,
-      CH_NOT_APPLIED,
       CH_FAILED,
+      CH_NOT_APPLIED,
       CH_NO_CHANGE_REQUESTED,
       CH_SUCCEEDED
     }
@@ -75,6 +83,10 @@ static mode_t umask_value;
 /* If true, change the modes of directories recursively. */
 static bool recurse;
 
+/* 1 if --dereference, 0 if --no-dereference, -1 if neither has been
+   specified.  */
+static int dereference = -1;
+
 /* If true, force silence (suppress most of error messages). */
 static bool force_silent;
 
@@ -94,7 +106,8 @@ static struct dev_ino *root_dev_ino;
    non-character as a pseudo short option, starting with CHAR_MAX + 1.  */
 enum
 {
-  NO_PRESERVE_ROOT = CHAR_MAX + 1,
+  DEREFERENCE_OPTION = CHAR_MAX + 1,
+  NO_PRESERVE_ROOT,
   PRESERVE_ROOT,
   REFERENCE_FILE_OPTION
 };
@@ -102,7 +115,9 @@ enum
 static struct option const long_options[] =
 {
   {"changes", no_argument, NULL, 'c'},
+  {"dereference", no_argument, NULL, DEREFERENCE_OPTION},
   {"recursive", no_argument, NULL, 'R'},
+  {"no-dereference", no_argument, NULL, 'h'},
   {"no-preserve-root", no_argument, NULL, NO_PRESERVE_ROOT},
   {"preserve-root", no_argument, NULL, PRESERVE_ROOT},
   {"quiet", no_argument, NULL, 'f'},
@@ -115,38 +130,46 @@ static struct option const long_options[] =
 };
 
 /* Return true if the chmodable permission bits of FILE changed.
-   The old mode was OLD_MODE, but it was changed to NEW_MODE.  */
+   FD, if nonnegative, is the descriptor used to set *NEW_MODE.
+   Update *NEW_MODE if the resulting mode is read back.  */
 
 static bool
-mode_changed (int dir_fd, char const *file, char const *file_full_name,
-              mode_t old_mode, mode_t new_mode)
+mode_changed (int fd, int dir_fd, char const *file, char const *file_full_name,
+              mode_t old_mode, mode_t *new_mode, bool follow,
+              bool ignore_missing, bool *file_missing)
 {
-  if (new_mode & (S_ISUID | S_ISGID | S_ISVTX))
+  *file_missing = false;
+  if (*new_mode & (S_ISUID | S_ISGID | S_ISVTX))
     {
       /* The new mode contains unusual bits that the call to chmod may
          have silently cleared.  Check whether they actually changed.  */
 
       struct stat new_stats;
 
-      if (fstatat (dir_fd, file, &new_stats, 0) != 0)
+      if ((0 <= fd ? fstat (fd, &new_stats)
+           : fstatat (dir_fd, file, &new_stats,
+                      follow ? 0 : AT_SYMLINK_NOFOLLOW)) < 0)
         {
-          if (! force_silent)
+          *file_missing = (ignore_missing
+                           && ignorable_traversal_errno (errno));
+          if (! *file_missing && ! force_silent)
             error (0, errno, _("getting new attributes of %s"),
                    quoteaf (file_full_name));
           return false;
         }
 
-      new_mode = new_stats.st_mode;
+      *new_mode = new_stats.st_mode;
     }
 
-  return ((old_mode ^ new_mode) & CHMOD_MODE_BITS) != 0;
+  return ((old_mode ^ *new_mode) & CHMOD_MODE_BITS) != 0;
 }
 
 /* Tell the user how/if the MODE of FILE has been changed.
    CH describes what (if anything) has happened. */
 
 static void
-describe_change (char const *file, struct change_status const *ch)
+describe_change (char const *file, struct change_status const *ch,
+                 mode_t new_mode)
 {
   char perms[12];		/* "-rwxrwxrwx" ls-style modes. */
   char old_perms[12];
@@ -164,15 +187,15 @@ describe_change (char const *file, struct change_status const *ch)
       printf (_("%s could not be accessed\n"), quoted_file);
       return;
 
-    default:
+    case CH_FAILED: case CH_NO_CHANGE_REQUESTED: case CH_SUCCEEDED:
       break;
   }
 
   unsigned long int
     old_m = ch->old_mode & CHMOD_MODE_BITS,
-    m = ch->new_mode & CHMOD_MODE_BITS;
+    m = new_mode & CHMOD_MODE_BITS;
 
-  strmode (ch->new_mode, perms);
+  strmode (new_mode, perms);
   perms[10] = '\0';		/* Remove trailing space.  */
 
   strmode (ch->old_mode, old_perms);
@@ -190,10 +213,96 @@ describe_change (char const *file, struct change_status const *ch)
       fmt = _("mode of %s retained as %04lo (%s)\n");
       printf (fmt, quoted_file, m, &perms[1]);
       return;
-    default:
-      abort ();
+    case CH_NO_STAT: case CH_NOT_APPLIED: default:
+      affirm (false);
     }
   printf (fmt, quoted_file, old_m, &old_perms[1], m, &perms[1]);
+}
+
+enum
+{
+  ROOT_PRESERVED = -2,
+  SYMLINK_MODE_UNSUPPORTED = -1
+};
+
+/* Compute and apply FILE's new mode on the same object when possible.
+   ST is the status from FTS.  Without descriptor support, -Rh can use
+   the referent's mode to compute the symlink's new mode if FTS followed
+   the link.  This matters on systems that can change symlink permissions.
+   If the change succeeds through a descriptor, return it in *CHANGED_FD
+   for the caller to close.  Return 0 on success, SYMLINK_MODE_UNSUPPORTED
+   for an unsupported change to a symlink itself, ROOT_PRESERVED for '/',
+   or an errno value for other failures.  */
+static int
+adjust_file_mode (int dirfd, char const *file, bool follow, bool ignore_missing,
+                  struct stat const *st, struct change_status *ch,
+                  int *changed_fd)
+{
+  *changed_fd = -1;
+  /* FTS supplies full stat information for directories even with FTS_NOSTAT.
+     We do this separate --preserve-root check as it may be different with -H,-L
+     (where FTS follows a symlink to '/'), while -h would select the link
+     itself for the fstat below.  Check the directory so FTS skips it.  */
+  if (S_ISDIR (st->st_mode) && ROOT_DEV_INO_CHECK (root_dev_ino, st))
+    return ROOT_PRESERVED;
+#if USE_DESCRIPTOR_CHMOD
+  int fd = openat (dirfd, file, O_PATH | O_CLOEXEC | (follow ? 0 : O_NOFOLLOW));
+  struct stat fd_st;
+  int stat_errno = (fd < 0 || fstat (fd, &fd_st) < 0) ? errno : 0;
+  if (! stat_errno)
+    {
+      /* The name may have changed since FTS examined it.  */
+      if (ROOT_DEV_INO_CHECK (root_dev_ino, &fd_st))
+        {
+          close (fd);
+          return ROOT_PRESERVED;
+        }
+      st = &fd_st;
+    }
+#endif
+
+  /* Note without descriptor support, -Rh can use the target's mode
+     to compute the symlink's new mode if FTS followed the link.
+     Given this only matters on older systems, and then only on systems
+     that can change the permissions of a symlink, we ignore for now.  */
+
+  ch->old_mode = st->st_mode;
+  ch->new_mode = mode_adjust (ch->old_mode, S_ISDIR (ch->old_mode),
+                              umask_value, change, NULL);
+
+#if USE_DESCRIPTOR_CHMOD
+  int err = stat_errno;
+  if (! err && fchmodat (fd, "", ch->new_mode,
+                         AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) < 0)
+    err = errno;
+  if (! err)
+    {
+      *changed_fd = fd;
+      return 0;
+    }
+  if (0 <= fd)
+    close (fd);
+  if (! stat_errno && is_ENOTSUP (err) && ! follow && S_ISLNK (st->st_mode))
+    return SYMLINK_MODE_UNSUPPORTED;
+  if (stat_errno || (err != EINVAL && err != ENOSYS && err != ENOENT))
+    return err;
+#endif
+
+  /* Older systems may require a second lookup of the name.  */
+  if (fchmodat (dirfd, file, ch->new_mode,
+                follow ? 0 : AT_SYMLINK_NOFOLLOW) == 0)
+    return 0;
+  int chmod_errno = errno;
+  if (is_ENOTSUP (chmod_errno) && ! follow)
+    {
+      /* The pathname write can fail with ENOTSUP even on a regular file.  */
+      int is_symlink = issymlinkat (dirfd, file);
+      if (is_symlink < 0 && ignore_missing && ignorable_traversal_errno (errno))
+        return errno;
+      if (is_symlink == 1)
+        return SYMLINK_MODE_UNSUPPORTED;
+    }
+  return chmod_errno;
 }
 
 /* Change the mode of FILE.
@@ -206,10 +315,21 @@ process_file (FTS *fts, FTSENT *ent)
   char const *file_full_name = ent->fts_path;
   char const *file = ent->fts_accpath;
   const struct stat *file_stats = ent->fts_statp;
-  struct change_status ch = { 0, };
+  struct change_status ch = {0};
   ch.status = CH_NO_STAT;
+  struct stat stat_buf;
 
-  switch (ent->fts_info)
+  /* Adjust so a symlink identified by readdir
+     or by FTS' stat() are handled consistently.  */
+  int fts_info = ent->fts_info;
+  if (fts_info == FTS_NSOK && S_ISLNK (file_stats->st_mode))
+    fts_info = FTS_SL;
+  bool ignore_missing = fts_info != FTS_SL && ignore_missing_fts_entry (ent);
+
+  if (ignore_missing && ignorable_fts_error (ent))
+    return true;
+
+  switch (fts_info)
     {
     case FTS_DP:
       return true;
@@ -222,7 +342,7 @@ process_file (FTS *fts, FTSENT *ent)
          accessible when control reaches this point.  So, if this is
          the first time we've seen the FTS_NS for this file, tell
          fts_read to stat it "again".  */
-      if (ent->fts_level == 0 && ent->fts_number == 0)
+      if (ent->fts_level == FTS_ROOTLEVEL && ent->fts_number == 0)
         {
           ent->fts_number = 1;
           fts_set (fts, ent, FTS_AGAIN);
@@ -245,9 +365,30 @@ process_file (FTS *fts, FTSENT *ent)
       break;
 
     case FTS_SLNONE:
-      if (! force_silent)
-        error (0, 0, _("cannot operate on dangling symlink %s"),
-               quoteaf (file_full_name));
+      if (dereference)
+        {
+          if (! force_silent)
+            error (0, 0, _("cannot operate on dangling symlink %s"),
+                   quoteaf (file_full_name));
+          break;
+        }
+      ch.status = CH_NOT_APPLIED;
+      break;
+
+    case FTS_SL:
+      if (dereference == 1)
+        {
+          if (fstatat (fts->fts_cwd_fd, file, &stat_buf, 0) != 0)
+            {
+              if (! force_silent)
+                error (0, errno, _("cannot dereference %s"),
+                       quoteaf (file_full_name));
+              break;
+            }
+
+          file_stats = &stat_buf;
+        }
+      ch.status = CH_NOT_APPLIED;
       break;
 
     case FTS_DC:		/* directory that causes cycles */
@@ -262,48 +403,62 @@ process_file (FTS *fts, FTSENT *ent)
       break;
     }
 
-  if (ch.status == CH_NOT_APPLIED
-      && ROOT_DEV_INO_CHECK (root_dev_ino, file_stats))
+  mode_t reported_mode = 0;
+  if (ch.status == CH_NOT_APPLIED)
     {
-      ROOT_DEV_INO_WARN (file_full_name);
-      /* Tell fts not to traverse into this hierarchy.  */
-      fts_set (fts, ent, FTS_SKIP);
-      /* Ensure that we do not process "/" on the second visit.  */
-      ignore_value (fts_read (fts));
-      return false;
-    }
-
-  if (ch.status == CH_NOT_APPLIED && ! S_ISLNK (file_stats->st_mode))
-    {
-      ch.old_mode = file_stats->st_mode;
-      ch.new_mode = mode_adjust (ch.old_mode, S_ISDIR (ch.old_mode) != 0,
-                                 umask_value, change, NULL);
-      if (chmodat (fts->fts_cwd_fd, file, ch.new_mode) == 0)
-        ch.status = CH_SUCCEEDED;
-      else
+      bool follow_symlink = !!dereference;
+      if (dereference == -1) /* -H with/without -R, -P without -R.  */
+        follow_symlink = ent->fts_level == FTS_ROOTLEVEL;
+      int fd;
+      int chmod_errno = adjust_file_mode (fts->fts_cwd_fd, file, follow_symlink,
+                                          ignore_missing, file_stats, &ch, &fd);
+      reported_mode = ch.new_mode;
+      if (chmod_errno == ROOT_PRESERVED)
         {
+          ROOT_DEV_INO_WARN (file_full_name);
+          if (ent->fts_info == FTS_D)  /* preorder directory.  */
+            {
+              fts_set (fts, ent, FTS_SKIP);
+              /* Consume the postorder visit.  */
+              ignore_value (fts_read (fts));
+            }
+          return false;
+        }
+      if (! chmod_errno)
+        {
+          bool file_missing = false;
+          ch.status = CH_SUCCEEDED;
+          if (verbosity != V_off
+              && !mode_changed (fd, fts->fts_cwd_fd, file, file_full_name,
+                                ch.old_mode, &reported_mode, follow_symlink,
+                                ignore_missing, &file_missing))
+            ch.status = CH_NO_CHANGE_REQUESTED;
+          if (0 <= fd)
+            close (fd);
+          if (file_missing)
+            return true;
+        }
+      else if (0 < chmod_errno)
+        {
+          if (ignore_missing
+              && ignorable_traversal_errno (chmod_errno))
+            return true;
           if (! force_silent)
-            error (0, errno, _("changing permissions of %s"),
+            error (0, chmod_errno, _("changing permissions of %s"),
                    quoteaf (file_full_name));
           ch.status = CH_FAILED;
         }
     }
 
-  if (verbosity != V_off)
-    {
-      if (ch.status == CH_SUCCEEDED
-          && !mode_changed (fts->fts_cwd_fd, file, file_full_name,
-                            ch.old_mode, ch.new_mode))
-        ch.status = CH_NO_CHANGE_REQUESTED;
-
-      if (ch.status == CH_SUCCEEDED || verbosity == V_high)
-        describe_change (file_full_name, &ch);
-    }
+  if (verbosity == V_high
+      || (verbosity == V_changes_only && ch.status == CH_SUCCEEDED))
+    describe_change (file_full_name, &ch, reported_mode);
 
   if (CH_NO_CHANGE_REQUESTED <= ch.status && diagnose_surprises)
     {
       mode_t naively_expected_mode =
-        mode_adjust (ch.old_mode, S_ISDIR (ch.old_mode) != 0, 0, change, NULL);
+        mode_adjust (ch.old_mode, S_ISDIR (ch.old_mode) != 0,
+                     0, change, NULL);
       if (ch.new_mode & ~naively_expected_mode)
         {
           char new_perms[12];
@@ -322,11 +477,11 @@ process_file (FTS *fts, FTSENT *ent)
   if ( ! recurse)
     fts_set (fts, ent, FTS_SKIP);
 
-  return CH_NO_CHANGE_REQUESTED <= ch.status;
+  return CH_NOT_APPLIED <= ch.status;
 }
 
 /* Recursively change the modes of the specified FILES (the last entry
-   of which is NULL).  BIT_FLAGS controls how fts works.
+   of which is null).  BIT_FLAGS controls how fts works.
    Return true if successful.  */
 
 static bool
@@ -383,23 +538,47 @@ Change the mode of each FILE to MODE.\n\
 With --reference, change the mode of each FILE to that of RFILE.\n\
 \n\
 "), stdout);
-      fputs (_("\
-  -c, --changes          like verbose but report only when a change is made\n\
-  -f, --silent, --quiet  suppress most error messages\n\
-  -v, --verbose          output a diagnostic for every file processed\n\
-"), stdout);
-      fputs (_("\
-      --no-preserve-root  do not treat '/' specially (the default)\n\
-      --preserve-root    fail to operate recursively on '/'\n\
-"), stdout);
-      fputs (_("\
-      --reference=RFILE  use RFILE's mode instead of MODE values\n\
-"), stdout);
-      fputs (_("\
-  -R, --recursive        change files and directories recursively\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -c, --changes\n\
+         like verbose but report only when a change is made\n\
+"));
+      oputs (_("\
+  -f, --silent, --quiet\n\
+         suppress most error messages\n\
+"));
+      oputs (_("\
+  -v, --verbose\n\
+         output a diagnostic for every file processed\n\
+"));
+      oputs (_("\
+      --dereference\n\
+         affect the referent of each symbolic link,\n\
+         rather than the symbolic link itself\n\
+"));
+      oputs (_("\
+  -h, --no-dereference\n\
+         affect each symbolic link, rather than the referent\n\
+"));
+      oputs (_("\
+      --no-preserve-root\n\
+         do not treat '/' specially (the default)\n\
+"));
+      oputs (_("\
+      --preserve-root\n\
+         fail to operate recursively on '/'\n\
+"));
+      oputs (_("\
+      --reference=RFILE\n\
+         use RFILE's mode instead of specifying MODE values.\n\
+         RFILE is always dereferenced if a symbolic link.\n\
+"));
+      oputs (_("\
+  -R, --recursive\n\
+         change files and directories recursively\n\
+"));
+      emit_symlink_recurse_options ("-H");
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
 Each MODE is of the form '[ugoa]*([-+=]([rwxXst]*|[ugo]))+|[-+=][0-7]+'.\n\
@@ -416,12 +595,13 @@ int
 main (int argc, char **argv)
 {
   char *mode = NULL;
-  size_t mode_len = 0;
-  size_t mode_alloc = 0;
+  idx_t mode_len = 0;
+  idx_t mode_alloc = 0;
   bool ok;
   bool preserve_root = false;
   char const *reference_file = NULL;
   int c;
+  int bit_flags = FTS_COMFOLLOW | FTS_PHYSICAL;
 
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
@@ -431,16 +611,36 @@ main (int argc, char **argv)
 
   atexit (close_stdout);
 
-  recurse = force_silent = diagnose_surprises = false;
-
   while ((c = getopt_long (argc, argv,
-                           ("Rcfvr::w::x::X::s::t::u::g::o::a::,::+::=::"
+                           ("HLPRcfhvr::w::x::X::s::t::u::g::o::a::,::+::=::"
                             "0::1::2::3::4::5::6::7::"),
                            long_options, NULL))
          != -1)
     {
       switch (c)
         {
+
+        case 'H': /* Traverse command-line symlinks-to-directories.  */
+          bit_flags = FTS_COMFOLLOW | FTS_PHYSICAL;
+          break;
+
+        case 'L': /* Traverse all symlinks-to-directories.  */
+          bit_flags = FTS_LOGICAL;
+          break;
+
+        case 'P': /* Traverse no symlinks-to-directories.  */
+          bit_flags = FTS_PHYSICAL;
+          break;
+
+        case 'h': /* --no-dereference: affect symlinks */
+          dereference = 0;
+          break;
+
+        case DEREFERENCE_OPTION: /* --dereference: affect the referent
+                                    of each symlink */
+          dereference = 1;
+          break;
+
         case 'r':
         case 'w':
         case 'x':
@@ -456,7 +656,7 @@ main (int argc, char **argv)
         case '=':
         case '0': case '1': case '2': case '3':
         case '4': case '5': case '6': case '7':
-          /* Support nonportable uses like "chmod -w", but diagnose
+          /* Support non-portable uses like "chmod -w", but diagnose
              surprises due to umask confusion.  Even though "--", "--r",
              etc., are valid modes, there is no "case '-'" here since
              getopt_long reserves leading "--" for long options.  */
@@ -467,14 +667,13 @@ main (int argc, char **argv)
                comma, and the new string (e.g., "-s,-rwx").  */
 
             char const *arg = argv[optind - 1];
-            size_t arg_len = strlen (arg);
-            size_t mode_comma_len = mode_len + !!mode_len;
-            size_t new_mode_len = mode_comma_len + arg_len;
+            idx_t arg_len = strlen (arg);
+            idx_t mode_comma_len = mode_len + !!mode_len;
+            idx_t new_mode_len = mode_comma_len + arg_len;
+            assume (0 <= new_mode_len);  /* Pacify GCC bug #109613.  */
             if (mode_alloc <= new_mode_len)
-              {
-                mode_alloc = new_mode_len + 1;
-                mode = X2REALLOC (mode, &mode_alloc);
-              }
+              mode = xpalloc (mode, &mode_alloc,
+                              new_mode_len + 1 - mode_alloc, -1, 1);
             mode[mode_len] = ',';
             memcpy (mode + mode_comma_len, arg, arg_len + 1);
             mode_len = new_mode_len;
@@ -510,6 +709,22 @@ main (int argc, char **argv)
         }
     }
 
+  if (recurse)
+    {
+      if (bit_flags == FTS_PHYSICAL)
+        {
+          if (dereference == 1)
+            error (EXIT_FAILURE, 0,
+                   _("-R --dereference requires either -H or -L"));
+          dereference = 0;
+        }
+    }
+  else
+    bit_flags = FTS_PHYSICAL | (dereference ? FTS_COMFOLLOW : 0);
+
+  if (dereference == -1 && bit_flags == FTS_LOGICAL)
+    dereference = 1;
+
   if (reference_file)
     {
       if (mode)
@@ -537,8 +752,8 @@ main (int argc, char **argv)
     {
       change = mode_create_from_ref (reference_file);
       if (!change)
-        die (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
-             quoteaf (reference_file));
+        error (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
+               quoteaf (reference_file));
     }
   else
     {
@@ -556,18 +771,22 @@ main (int argc, char **argv)
       static struct dev_ino dev_ino_buf;
       root_dev_ino = get_root_dev_ino (&dev_ino_buf);
       if (root_dev_ino == NULL)
-        die (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
-             quoteaf ("/"));
+        error (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
+               quoteaf ("/"));
     }
   else
     {
       root_dev_ino = NULL;
     }
 
-  ok = process_files (argv + optind,
-                      FTS_COMFOLLOW | FTS_PHYSICAL | FTS_DEFER_STAT);
+  bit_flags |= FTS_DEFER_STAT;
+#if USE_DESCRIPTOR_CHMOD
+  /* fstat supplies the mode, except when -v reports a failure to open
+     or stat the file.  */
+  if (verbosity != V_high)
+    bit_flags |= FTS_NOSTAT;
+#endif
+  ok = process_files (argv + optind, bit_flags);
 
-  IF_LINT (free (change));
-
-  return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  main_exit (ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }

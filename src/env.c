@@ -1,5 +1,5 @@
 /* env - run a program in a modified environment
-   Copyright (C) 1986-2021 Free Software Foundation, Inc.
+   Copyright (C) 1986-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -19,18 +19,21 @@
 #include <config.h>
 #include <stdio.h>
 #include <sys/types.h>
+#include <argz.h>
 #include <getopt.h>
 #include <c-ctype.h>
 #include <signal.h>
 
+#include "argmatch.h"  /* argmatch($QUOTING_STYLE).  */
+#include "hash.h"
+#include "hashcode-mem.h"
 #include "system.h"
-#include "die.h"
-#include "error.h"
-#include "idx.h"
-#include "minmax.h"
 #include "operand2sig.h"
+#include "printenv.h"
 #include "quote.h"
+#include "read-file.h"
 #include "sig2str.h"
+#include "xbinary-io.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "env"
@@ -42,15 +45,31 @@
 
 /* Array of envvars to unset.  */
 static char const **usvars;
-static size_t usvars_alloc;
+static idx_t usvars_alloc;
 static idx_t usvars_used;
+
+/* Storage for entries read by --env0-from.  */
+static char *env0_from_buffer;
+
+/* An environment vector managed directly to preserve raw entries.  */
+struct env_vector
+{
+  char **variable;
+  idx_t used;
+  idx_t allocated;
+};
 
 /* Annotate the output with extra info to aid the user.  */
 static bool dev_debug;
+#define vmsg devmsg
 
 /* Buffer and length of extracted envvars in -S strings.  */
 static char *varname;
 static idx_t vnlen;
+
+/* On mingw, winbase.h defines this to zero.  Undefine it so we can use it
+   in the enum.  */
+#undef IGNORE
 
 /* Possible actions on each signal.  */
 enum SIGNAL_MODE {
@@ -77,21 +96,25 @@ static bool report_signal_handling;
 /* The isspace characters in the C locale.  */
 #define C_ISSPACE_CHARS " \t\n\v\f\r"
 
-static char const shortopts[] = "+C:iS:u:v0" C_ISSPACE_CHARS;
+static char const shortopts[] = "+a:C:iS:u:v0" C_ISSPACE_CHARS;
 
 /* For long options that have no equivalent short option, use a
    non-character as a pseudo short option, starting with CHAR_MAX + 1.  */
 enum
 {
-  DEFAULT_SIGNAL_OPTION = CHAR_MAX + 1,
+  ENV0_FROM_OPTION = CHAR_MAX + 1,
+  DEFAULT_SIGNAL_OPTION,
   IGNORE_SIGNAL_OPTION,
   BLOCK_SIGNAL_OPTION,
   LIST_SIGNAL_HANDLING_OPTION,
+  QUOTING_STYLE_OPTION,
 };
 
 static struct option const longopts[] =
 {
+  {"argv0", required_argument, NULL, 'a'},
   {"ignore-environment", no_argument, NULL, 'i'},
+  {"env0-from", required_argument, NULL, ENV0_FROM_OPTION},
   {"null", no_argument, NULL, '0'},
   {"unset", required_argument, NULL, 'u'},
   {"chdir", required_argument, NULL, 'C'},
@@ -100,6 +123,7 @@ static struct option const longopts[] =
   {"block-signal",   optional_argument, NULL, BLOCK_SIGNAL_OPTION},
   {"list-signal-handling", no_argument, NULL,  LIST_SIGNAL_HANDLING_OPTION},
   {"debug", no_argument, NULL, 'v'},
+  {"quoting-style", required_argument, NULL, QUOTING_STYLE_OPTION},
   {"split-string", required_argument, NULL, 'S'},
   {GETOPT_HELP_OPTION_DECL},
   {GETOPT_VERSION_OPTION_DECL},
@@ -122,35 +146,63 @@ Set each NAME to VALUE in the environment and run COMMAND.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-  -i, --ignore-environment  start with an empty environment\n\
-  -0, --null           end each output line with NUL, not newline\n\
-  -u, --unset=NAME     remove variable from the environment\n\
-"), stdout);
-      fputs (_("\
-  -C, --chdir=DIR      change working directory to DIR\n\
-"), stdout);
-      fputs (_("\
-  -S, --split-string=S  process and split S into separate arguments;\n\
-                        used to pass multiple arguments on shebang lines\n\
-"), stdout);
-      fputs (_("\
-      --block-signal[=SIG]    block delivery of SIG signal(s) to COMMAND\n\
-"), stdout);
-      fputs (_("\
-      --default-signal[=SIG]  reset handling of SIG signal(s) to the default\n\
-"), stdout);
-      fputs (_("\
-      --ignore-signal[=SIG]   set handling of SIG signal(s) to do nothing\n\
-"), stdout);
-      fputs (_("\
-      --list-signal-handling  list non default signal handling to stderr\n\
-"), stdout);
-      fputs (_("\
-  -v, --debug          print verbose information for each processing step\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -a, --argv0=ARG\n\
+         pass ARG as the zeroth argument of COMMAND\n\
+"));
+      oputs (_("\
+  -i, --ignore-environment\n\
+         start with an empty environment\n\
+"));
+      oputs (_("\
+      --env0-from=FILE\n\
+         read NUL-delimited environment entries from FILE\n\
+"));
+      oputs (_("\
+  -0, --null\n\
+         end each output line with NUL, not newline\n\
+"));
+      oputs (_("\
+  -u, --unset=NAME\n\
+         remove variable from the environment\n\
+"));
+      oputs (_("\
+  -C, --chdir=DIR\n\
+         change working directory to DIR\n\
+"));
+      oputs (_("\
+      --quoting-style=WORD\n\
+         use quoting style WORD for names and values:\n\
+           literal, locale, shell, shell-always,\n\
+           shell-escape, shell-escape-always, c, escape\n\
+"));
+      oputs (_("\
+  -S, --split-string=S\n\
+         process and split S into separate arguments;\n\
+         used to pass multiple arguments on shebang lines\n\
+"));
+      oputs (_("\
+      --block-signal[=SIG]\n\
+         block delivery of SIG signal(s) to COMMAND\n\
+"));
+      oputs (_("\
+      --default-signal[=SIG]\n\
+         reset handling of SIG signal(s) to the default\n\
+"));
+      oputs (_("\
+      --ignore-signal[=SIG]\n\
+         set handling of SIG signal(s) to do nothing\n\
+"));
+      oputs (_("\
+      --list-signal-handling\n\
+         list non default signal handling to standard error\n\
+"));
+      oputs (_("\
+  -v, --debug\n\
+         print verbose information for each processing step\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
 A mere - implies -i.  If no COMMAND, print the resulting environment.\n\
@@ -159,8 +211,9 @@ A mere - implies -i.  If no COMMAND, print the resulting environment.\n\
 \n\
 SIG may be a signal name like 'PIPE', or a signal number like '13'.\n\
 Without SIG, all known signals are included.  Multiple signals can be\n\
-comma-separated.\n\
+comma-separated.  An empty SIG argument is a no-op.\n\
 "), stdout);
+      emit_exec_status (PROGRAM_NAME);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -170,7 +223,7 @@ static void
 append_unset_var (char const *var)
 {
   if (usvars_used == usvars_alloc)
-    usvars = x2nrealloc (usvars, &usvars_alloc, sizeof *usvars);
+    usvars = xpalloc (usvars, &usvars_alloc, 1, -1, sizeof *usvars);
   usvars[usvars_used++] = var;
 }
 
@@ -179,17 +232,242 @@ unset_envvars (void)
 {
   for (idx_t i = 0; i < usvars_used; ++i)
     {
-      devmsg ("unset:    %s\n", usvars[i]);
+      vmsg (_("unsetting: %s\n"), quote (usvars[i]));
 
       if (unsetenv (usvars[i]))
-        die (EXIT_CANCELED, errno, _("cannot unset %s"),
-             quote (usvars[i]));
+        error (EXIT_CANCELED, errno, _("cannot unset %s"),
+               quote (usvars[i]));
+    }
+}
+
+/* Return true if ENTRY is an assignment whose name is NAME.  */
+static bool
+entry_has_name (char const *entry, char const *name, idx_t name_length)
+{
+  char const *eq = strchr (entry, '=');
+  return (eq && eq - entry == name_length
+          && memeq (entry, name, name_length));
+}
+
+#if ! defined _WIN32 || defined __CYGWIN__
+/* Hash an environment vector slot by the name in its assignment.  */
+static size_t
+env_vector_slot_hash (void const *x, size_t table_size)
+{
+  char *const *slot = x;
+  char const *entry = *slot;
+  char const *eq = strchr (entry, '=');
+  return hash_pjw_bare (entry, eq - entry) % table_size;
+}
+
+static bool
+env_vector_slot_compare (void const *x, void const *y)
+{
+  char const *a = * (char *const *) x;
+  char const *b = * (char *const *) y;
+  char const *b_eq = strchr (b, '=');
+  return entry_has_name (a, b, b_eq - b);
+}
+#endif
+
+/* Remove the requested variables from ENV,
+   directly, preserving other raw entries.  */
+static void
+unset_envvars_in_vector (struct env_vector *env)
+{
+  for (idx_t i = 0; i < usvars_used; ++i)
+    {
+      char const *name = usvars[i];
+      vmsg (_("unsetting: %s\n"), quote (name));
+
+      if (! *name || strchr (name, '='))
+        error (EXIT_CANCELED, EINVAL, _("cannot unset %s"), quoteaf (name));
+
+      idx_t name_length = strlen (name);
+      idx_t dest = 0;
+      for (idx_t source = 0; source < env->used; ++source)
+        if (! entry_has_name (env->variable[source], name, name_length))
+          env->variable[dest++] = env->variable[source];
+
+      env->used = dest;
+      env->variable[dest] = NULL;
+    }
+}
+
+/* Add ASSIGNMENT to the environment.  EQ points to its '=' byte.  */
+static void
+set_envvar (char *assignment, char *eq)
+{
+  vmsg (_("setting:   %s\n"), quote (assignment));
+
+  if (putenv (assignment))
+    {
+      *eq = '\0';
+      error (EXIT_CANCELED, errno, _("cannot set %s"), quote (assignment));
+    }
+}
+
+/* Add ASSIGNMENT to ENV directly, preserving other raw entries.
+   EQ points to its '=' byte.  Replace the first existing assignment
+   with the same name, as putenv does, or append ASSIGNMENT if none.  */
+static void
+set_envvar_in_vector (struct env_vector *env, char *assignment, char *eq)
+{
+  vmsg (_("setting:   %s\n"), quote (assignment));
+
+  idx_t name_length = eq - assignment;
+  for (idx_t i = 0; i < env->used; ++i)
+    if (entry_has_name (env->variable[i], assignment, name_length))
+      {
+        env->variable[i] = assignment;
+        return;
+      }
+
+  if (env->used + 1 == env->allocated)
+    {
+      env->variable = xpalloc (env->variable, &env->allocated, 1, -1,
+                               sizeof *env->variable);
+      environ = env->variable;
     }
 
-  IF_LINT (free (usvars));
-  IF_LINT (usvars = NULL);
-  IF_LINT (usvars_used = 0);
-  IF_LINT (usvars_alloc = 0);
+  env->variable[env->used++] = assignment;
+  env->variable[env->used] = NULL;
+}
+
+/* Read the NUL-delimited environment entries in FILE.  */
+static size_t
+read_env_file (char const *file)
+{
+  size_t size;
+  if (streq (file, "-"))
+    {
+      xset_binary_mode (STDIN_FILENO, O_BINARY);
+      env0_from_buffer = fread_file (stdin, RF_BINARY, &size);
+    }
+  else
+    env0_from_buffer = read_file (file, RF_BINARY, &size);
+
+  if (! env0_from_buffer)
+    error (EXIT_CANCELED, errno, _("cannot read %s"), quoteaf (file));
+  if (size && env0_from_buffer[size - 1] != '\0')
+    error (EXIT_CANCELED, 0, _("%s: file must end with a NUL byte"),
+           quotef (file));
+
+  return size;
+}
+
+/* Merge the NUL-delimited entries in FILE into the environment.
+   Return true if ENV now owns the environment vector.  */
+static bool
+set_envvars_from_file (struct env_vector *env, char const *file)
+{
+  size_t size = read_env_file (file);
+
+#if defined _WIN32 && ! defined __CYGWIN__
+  (void) env;
+  /* On native Windows, _putenv keeps _environ, _wenviron, and the process
+     environment block synchronized.  Replacing environ directly would
+     conflict with its ownership of those data structures.  */
+  char *assignment = NULL;
+  while ((assignment = argz_next (env0_from_buffer, size, assignment)))
+    {
+      char *eq = strchr (assignment, '=');
+      if (! eq)
+        error (EXIT_CANCELED, 0,
+               _("invalid variable specification %s in %s"),
+               quoteaf_n (0, assignment), quoteaf_n (1, file));
+
+      set_envvar (assignment, eq);
+    }
+  return false;
+#else
+  /* Construct and index the merged vector, rather than making putenv
+     repeatedly scan the growing environment for every assignment.  */
+  idx_t file_count = argz_count (env0_from_buffer, size);
+
+  if (file_count == 0)
+    return false;
+
+  idx_t inherited_count = 0;
+  while (environ[inherited_count])
+    ++inherited_count;
+
+  if (IDX_MAX - inherited_count <= file_count)
+    xalloc_die ();
+  idx_t max_count = inherited_count + file_count;
+  char **merged = xnmalloc (max_count + 1, sizeof *merged);
+  memcpy (merged, environ, inherited_count * sizeof *merged);
+  merged[inherited_count] = NULL;
+
+  Hash_table *slot_table
+    = hash_initialize (max_count, NULL, env_vector_slot_hash,
+                       env_vector_slot_compare, NULL);
+  if (! slot_table)
+    xalloc_die ();
+
+  /* Index only the first occurrence of each inherited name, matching
+     putenv's replacement of the first such entry.  */
+  for (idx_t i = 0; i < inherited_count; ++i)
+    {
+      char *eq = strchr (merged[i], '=');
+      if (! eq)
+        continue;
+
+      if (! hash_insert (slot_table, &merged[i]))
+        xalloc_die ();
+    }
+
+  idx_t merged_count = inherited_count;
+  char *assignment = NULL;
+  while ((assignment = argz_next (env0_from_buffer, size, assignment)))
+    {
+      char *eq = strchr (assignment, '=');
+      if (! eq)
+        {
+          vmsg (_("adding:    %s\n"), quote (assignment));
+          merged[merged_count++] = assignment;
+        }
+      else
+        {
+          vmsg (_("setting:   %s\n"), quote (assignment));
+
+          char **slot = hash_lookup (slot_table, &assignment);
+          if (slot)
+            *slot = assignment;
+          else
+            {
+              merged[merged_count] = assignment;
+              if (! hash_insert (slot_table, &merged[merged_count]))
+                xalloc_die ();
+              ++merged_count;
+            }
+        }
+    }
+
+  merged[merged_count] = NULL;
+  env->variable = merged;
+  env->used = merged_count;
+  env->allocated = max_count + 1;
+  environ = merged;
+  hash_free (slot_table);
+  return true;
+#endif
+}
+
+/* Replace the environment with the NUL-delimited entries in FILE,
+   preserving the entries byte-for-byte and in their original order.  */
+static void
+set_raw_environment_from_file (struct env_vector *env,
+                               char const *file)
+{
+  size_t size = read_env_file (file);
+  idx_t entry_count = argz_count (env0_from_buffer, size);
+
+  env->allocated = entry_count + 1;
+  env->variable = xnmalloc (env->allocated, sizeof *env->variable);
+  argz_extract (env0_from_buffer, size, env->variable);
+  env->used = entry_count;
+  environ = env->variable;
 }
 
 /* Return a pointer to the end of a valid ${VARNAME} string, or NULL.
@@ -197,7 +475,8 @@ unset_envvars (void)
    First letter in VARNAME must be alpha or underscore,
    rest of letters are alnum or underscore.
    Any other character is an error.  */
-static char const * _GL_ATTRIBUTE_PURE
+ATTRIBUTE_PURE
+static char const *
 scan_varname (char const *str)
 {
   if (str[1] == '{' && (c_isalpha (str[2]) || str[2] == '_'))
@@ -220,20 +499,18 @@ scan_varname (char const *str)
 static char *
 extract_varname (char const *str)
 {
-  idx_t i;
-  char const *p;
+  char const *p = scan_varname (str);
 
-  p = scan_varname (str);
   if (!p)
     return NULL;
 
   /* -2 and +2 (below) account for the '${' prefix.  */
-  i = p - str - 2;
+  idx_t i = p - str - 2;
 
   if (i >= vnlen)
     {
-      vnlen = i + 1;
-      varname = xrealloc (varname, vnlen);
+      free (varname);
+      varname = xpalloc (NULL, &vnlen, i + 1 - vnlen, -1, sizeof *varname);
     }
 
   memcpy (varname, str + 2, i);
@@ -294,7 +571,7 @@ splitbuf_append_byte (struct splitbuf *ss, char c)
   if (ss->half_alloc * sizeof *ss->argv <= string_bytes)
     splitbuf_grow (ss);
   ((char *) (ss->argv + ss->half_alloc))[string_bytes] = c;
-  ss->argv[ss->argc] = (char *) (intptr_t) (string_bytes + 1);
+  ss->argv[ss->argc] = (char *) (intptr_t) {string_bytes + 1};
 }
 
 /* If SS's most recent character was a separator, finish off its
@@ -362,7 +639,7 @@ build_argv (char const *str, int extra_argc, int *argc)
   ss.half_alloc = extra_argc + 2;
   ss.extra_argc = extra_argc;
   ss.sep = true;
-  ss.argv[ss.argc] = 0;
+  ss.argv[ss.argc] = NULL;
 
   /* In the following loop,
      'break' causes the character 'newc' to be added to *dest,
@@ -428,8 +705,8 @@ build_argv (char const *str, int extra_argc, int *argc)
 
             case 'c':
               if (dq)
-                die (EXIT_CANCELED, 0,
-                     _("'\\c' must not appear in double-quoted -S string"));
+                error (EXIT_CANCELED, 0,
+                       _("'\\c' must not appear in double-quoted -S string"));
               goto eos; /* '\c' terminates the string.  */
 
             case 'f': newc = '\f'; break;
@@ -439,11 +716,12 @@ build_argv (char const *str, int extra_argc, int *argc)
             case 'v': newc = '\v'; break;
 
             case '\0':
-              die (EXIT_CANCELED, 0,
-                   _("invalid backslash at end of string in -S"));
+              error (EXIT_CANCELED, 0,
+                     _("invalid backslash at end of string in -S"));
 
             default:
-              die (EXIT_CANCELED, 0, _("invalid sequence '\\%c' in -S"), newc);
+              error (EXIT_CANCELED, 0,
+                     _("invalid sequence '\\%c' in -S"), newc);
             }
           break;
 
@@ -456,20 +734,20 @@ build_argv (char const *str, int extra_argc, int *argc)
           {
             char *n = extract_varname (str);
             if (!n)
-              die (EXIT_CANCELED, 0,
-                   _("only ${VARNAME} expansion is supported, error at: %s"),
-                   str);
+              error (EXIT_CANCELED, 0,
+                     _("only ${VARNAME} expansion is supported, error at: %s"),
+                     quote (str));
 
             char *v = getenv (n);
             if (v)
               {
                 check_start_new_arg (&ss);
-                devmsg ("expanding ${%s} into %s\n", n, quote (v));
+                vmsg (_("expanding ${%s} into %s\n"), n, quote (v));
                 for (; *v; v++)
                   splitbuf_append_byte (&ss, *v);
               }
             else
-              devmsg ("replacing ${%s} with null string\n", n);
+              vmsg (_("replacing ${%s} with empty string\n"), n);
 
             str = strchr (str, '}') + 1;
             continue;
@@ -482,7 +760,7 @@ build_argv (char const *str, int extra_argc, int *argc)
     }
 
   if (dq || sq)
-    die (EXIT_CANCELED, 0, _("no terminating quote in -S string"));
+    error (EXIT_CANCELED, 0, _("no terminating quote in -S string"));
 
  eos:
   splitbuf_append_byte (&ss, '\0');
@@ -524,10 +802,10 @@ parse_split_string (char const *str, int *orig_optind,
   /* Print parsed arguments.  */
   if (dev_debug && 1 < newargc)
     {
-      devmsg ("split -S:  %s\n", quote (str));
-      devmsg (" into:    %s\n", quote (newargv[1]));
+      vmsg (_("split -S:  %s\n"), quote (str));
+      vmsg (_(" into:     %s\n"), quote (newargv[1]));
       for (int i = 2; i < newargc; i++)
-        devmsg ("     &    %s\n", quote (newargv[i]));
+        vmsg (_("     &     %s\n"), quote (newargv[i]));
     }
 
   /* Add remaining arguments and terminating null from the original
@@ -542,29 +820,24 @@ parse_split_string (char const *str, int *orig_optind,
 }
 
 static void
-parse_signal_action_params (char const *optarg, bool set_default)
+parse_signal_action_params (char const *arg, bool set_default)
 {
-  char signame[SIG2STR_MAX];
-  char *opt_sig;
-  char *optarg_writable;
-
-  if (! optarg)
+  if (! arg)
     {
       /* Without an argument, reset all signals.
          Some signals cannot be set to ignore or default (e.g., SIGKILL,
          SIGSTOP on most OSes, and SIGCONT on AIX.) - so ignore errors.  */
       for (int i = 1 ; i <= SIGNUM_BOUND; i++)
-        if (sig2str (i, signame) == 0)
-          signals[i] = set_default ? DEFAULT_NOERR : IGNORE_NOERR;
+        signals[i] = set_default ? DEFAULT_NOERR : IGNORE_NOERR;
       return;
     }
 
-  optarg_writable = xstrdup (optarg);
+  char *optarg_writable = xstrdup (arg);
 
-  opt_sig = strtok (optarg_writable, ",");
+  char *opt_sig = strtok (optarg_writable, ",");
   while (opt_sig)
     {
-      int signum = operand2sig (opt_sig, signame);
+      int signum = operand2sig (opt_sig);
       /* operand2sig accepts signal 0 (EXIT) - but we reject it.  */
       if (signum == 0)
         error (0, 0, _("%s: invalid signal"), quote (opt_sig));
@@ -598,39 +871,36 @@ reset_signal_handlers (void)
       int sig_err = sigaction (i, NULL, &act);
 
       if (sig_err && !ignore_errors)
-        die (EXIT_CANCELED, errno,
-             _("failed to get signal action for signal %d"), i);
+        error (EXIT_CANCELED, errno,
+               _("failed to get signal action for signal %d"), i);
 
       if (! sig_err)
         {
           act.sa_handler = set_to_default ? SIG_DFL : SIG_IGN;
           sig_err = sigaction (i, &act, NULL);
           if (sig_err && !ignore_errors)
-            die (EXIT_CANCELED, errno,
-                 _("failed to set signal action for signal %d"), i);
+            error (EXIT_CANCELED, errno,
+                   _("failed to set signal action for signal %d"), i);
         }
 
       if (dev_debug)
         {
           char signame[SIG2STR_MAX];
-          sig2str (i, signame);
-          devmsg ("Reset signal %s (%d) to %s%s\n",
+          if (sig2str (i, signame) != 0)
+            snprintf (signame, sizeof signame, "SIG%d", i);
+          vmsg (_("Reset signal %s (%d) to %s%s\n"),
                   signame, i,
                   set_to_default ? "DEFAULT" : "IGNORE",
-                  sig_err ? " (failure ignored)" : "");
+                  sig_err ? _(" (failure ignored)") : "");
         }
     }
 }
 
 
 static void
-parse_block_signal_params (char const *optarg, bool block)
+parse_block_signal_params (char const *arg, bool block)
 {
-  char signame[SIG2STR_MAX];
-  char *opt_sig;
-  char *optarg_writable;
-
-  if (! optarg)
+  if (! arg)
     {
       /* Without an argument, reset all signals.  */
       sigfillset (block ? &block_signals : &unblock_signals);
@@ -645,23 +915,30 @@ parse_block_signal_params (char const *optarg, bool block)
 
   sig_mask_changed = true;
 
-  if (! optarg)
+  if (! arg)
     return;
 
-  optarg_writable = xstrdup (optarg);
+  char *optarg_writable = xstrdup (arg);
 
-  opt_sig = strtok (optarg_writable, ",");
+  char *opt_sig = strtok (optarg_writable, ",");
   while (opt_sig)
     {
-      int signum = operand2sig (opt_sig, signame);
+      int signum = operand2sig (opt_sig);
       /* operand2sig accepts signal 0 (EXIT) - but we reject it.  */
       if (signum == 0)
         error (0, 0, _("%s: invalid signal"), quote (opt_sig));
       if (signum <= 0)
         usage (exit_failure);
 
-      sigaddset (block ? &block_signals : &unblock_signals, signum);
-      sigdelset (block ? &unblock_signals : &block_signals, signum);
+      if (sigaddset (block ? &block_signals : &unblock_signals, signum) == -1)
+        {
+          if (block)
+            error (EXIT_CANCELED, errno,
+                   _("failed to block signal %d"), signum);
+          /* else diagnosed in parse_signal_action_params().  */
+        }
+      else
+        sigdelset (block ? &unblock_signals : &block_signals, signum);
 
       opt_sig = strtok (NULL, ",");
     }
@@ -674,15 +951,16 @@ set_signal_proc_mask (void)
 {
   /* Get the existing signal mask */
   sigset_t set;
-  char const *debug_act;
 
   sigemptyset (&set);
 
   if (sigprocmask (0, NULL, &set))
-    die (EXIT_CANCELED, errno, _("failed to get signal process mask"));
+    error (EXIT_CANCELED, errno, _("failed to get signal process mask"));
 
   for (int i = 1; i <= SIGNUM_BOUND; i++)
     {
+      char const *debug_act = NULL;
+
       if (sigismember (&block_signals, i))
         {
           sigaddset (&set, i);
@@ -693,33 +971,29 @@ set_signal_proc_mask (void)
           sigdelset (&set, i);
           debug_act = "UNBLOCK";
         }
-      else
-        {
-          debug_act = NULL;
-        }
 
       if (dev_debug && debug_act)
         {
           char signame[SIG2STR_MAX];
-          sig2str (i, signame);
-          devmsg ("signal %s (%d) mask set to %s\n",
+          if (sig2str (i, signame) != 0)
+            snprintf (signame, sizeof signame, "SIG%d", i);
+          vmsg (_("signal %s (%d) mask set to %s\n"),
                   signame, i, debug_act);
         }
     }
 
   if (sigprocmask (SIG_SETMASK, &set, NULL))
-    die (EXIT_CANCELED, errno, _("failed to set signal process mask"));
+    error (EXIT_CANCELED, errno, _("failed to set signal process mask"));
 }
 
 static void
 list_signal_handling (void)
 {
   sigset_t set;
-  char signame[SIG2STR_MAX];
 
   sigemptyset (&set);
   if (sigprocmask (0, NULL, &set))
-    die (EXIT_CANCELED, errno, _("failed to get signal process mask"));
+    error (EXIT_CANCELED, errno, _("failed to get signal process mask"));
 
   for (int i = 1; i <= SIGNUM_BOUND; i++)
     {
@@ -734,7 +1008,9 @@ list_signal_handling (void)
       if (! *ignored && ! *blocked)
         continue;
 
-      sig2str (i, signame);
+      char signame[SIG2STR_MAX];
+      if (sig2str (i, signame) != 0)
+        snprintf (signame, sizeof signame, "SIG%d", i);
       fprintf (stderr, "%-10s (%2d): %s%s%s\n", signame, i,
                blocked, connect, ignored);
     }
@@ -747,17 +1023,22 @@ initialize_signals (void)
 
   for (int i = 0 ; i <= SIGNUM_BOUND; i++)
     signals[i] = UNCHANGED;
-
-  return;
 }
 
 int
 main (int argc, char **argv)
 {
-  int optc;
   bool ignore_environment = false;
   bool opt_nul_terminate_output = false;
+  int quoting_style_opt = -1;
   char const *newdir = NULL;
+  char const *env0_from_file = NULL;
+  char *argv0 = NULL;
+  struct env_vector env_vector;
+#ifdef lint
+  memset (&env_vector, 0, sizeof env_vector);
+  char **initial_environ = environ;
+#endif
 
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
@@ -770,10 +1051,14 @@ main (int argc, char **argv)
 
   initialize_signals ();
 
+  int optc;
   while ((optc = getopt_long (argc, argv, shortopts, longopts, NULL)) != -1)
     {
       switch (optc)
         {
+        case 'a':
+          argv0 = optarg;
+          break;
         case 'i':
           ignore_environment = true;
           break;
@@ -785,6 +1070,10 @@ main (int argc, char **argv)
           break;
         case '0':
           opt_nul_terminate_output = true;
+          quoting_style_opt = literal_quoting_style;
+          break;
+        case ENV0_FROM_OPTION:
+          env0_from_file = optarg;
           break;
         case DEFAULT_SIGNAL_OPTION:
           parse_signal_action_params (optarg, true);
@@ -799,6 +1088,11 @@ main (int argc, char **argv)
         case LIST_SIGNAL_HANDLING_OPTION:
           report_signal_handling = true;
           break;
+        case QUOTING_STYLE_OPTION:
+          quoting_style_opt = XARGMATCH ("--quoting-style", optarg,
+                                         quoting_style_args,
+                                         quoting_style_vals);
+          break;
         case 'C':
           newdir = optarg;
           break;
@@ -810,9 +1104,12 @@ main (int argc, char **argv)
              incorrect shebang usage with extraneous space, e.g.:
                 #!/usr/bin/env -i command
              In which case argv[1] == "-i command".  */
-          error (0, 0, _("invalid option -- '%c'"), optc);
-          error (0, 0, _("use -[v]S to pass options in shebang lines"));
-          usage (EXIT_CANCELED);
+          {
+            char c = optc;
+            error (0, 0, _("invalid option -- %s"), quote_mem (&c, 1));
+            error (0, 0, _("use -[v]S to pass options in shebang lines"));
+            usage (EXIT_CANCELED);
+          }
 
         case_GETOPT_HELP_CHAR;
         case_GETOPT_VERSION_CHAR (PROGRAM_NAME, AUTHORS);
@@ -821,36 +1118,74 @@ main (int argc, char **argv)
         }
     }
 
-  if (optind < argc && STREQ (argv[optind], "-"))
+  if (optind < argc && streq (argv[optind], "-"))
     {
       ignore_environment = true;
       ++optind;
     }
 
-  if (ignore_environment)
+  int program_index = optind;
+  while (program_index < argc && strchr (argv[program_index], '='))
+    program_index++;
+  bool program_specified = program_index < argc;
+
+  bool quote_output = false;
+  int qs = quoting_style_opt;
+  if (! program_specified && qs < 0 && isatty (STDOUT_FILENO))
     {
-      devmsg ("cleaning environ\n");
+      /* Get the value from $QUOTING_STYLE before unsetting env vars.  */
+      qs = getenv_quoting_style ();
+      if (qs < 0)
+        qs = shell_escape_quoting_style;
+    }
+  if (0 <= qs && qs != literal_quoting_style)
+    {
+      set_quoting_style (NULL, qs);
+      quote_output = true;
+    }
+
+  bool env_vector_active = false;
+  if (ignore_environment && env0_from_file)
+    {
+      vmsg (_("clearing environment\n"));
+      set_raw_environment_from_file (&env_vector, env0_from_file);
+      env_vector_active = true;
+    }
+  else if (ignore_environment)
+    {
+      vmsg (_("clearing environment\n"));
+#if defined _WIN32 && ! defined __CYGWIN__
       static char *dummy_environ[] = { NULL };
       environ = dummy_environ;
+#else
+      env_vector.variable = xnmalloc (1, sizeof *env_vector.variable);
+      env_vector.variable[0] = NULL;
+      env_vector.used = 0;
+      env_vector.allocated = 1;
+      environ = env_vector.variable;
+      env_vector_active = true;
+#endif
     }
-  else
-    unset_envvars ();
+  else if (env0_from_file)
+    env_vector_active = set_envvars_from_file (&env_vector, env0_from_file);
+
+  if (! ignore_environment || env0_from_file)
+    {
+      if (env_vector_active)
+        unset_envvars_in_vector (&env_vector);
+      else
+        unset_envvars ();
+    }
 
   char *eq;
   while (optind < argc && (eq = strchr (argv[optind], '=')))
     {
-      devmsg ("setenv:   %s\n", argv[optind]);
-
-      if (putenv (argv[optind]))
-        {
-          *eq = '\0';
-          die (EXIT_CANCELED, errno, _("cannot set %s"),
-               quote (argv[optind]));
-        }
+      if (env_vector_active)
+        set_envvar_in_vector (&env_vector, argv[optind], eq);
+      else
+        set_envvar (argv[optind], eq);
       optind++;
     }
-
-  bool program_specified = optind < argc;
 
   if (opt_nul_terminate_output && program_specified)
     {
@@ -864,12 +1199,30 @@ main (int argc, char **argv)
       usage (EXIT_CANCELED);
     }
 
+  if (argv0 && ! program_specified)
+    {
+      error (0, 0, _("must specify command with --argv0 (-a)"));
+      usage (EXIT_CANCELED);
+    }
+
   if (! program_specified)
     {
+      char const terminator = opt_nul_terminate_output ? '\0' : '\n';
+
+      if (opt_nul_terminate_output)
+        xset_binary_mode (STDOUT_FILENO, O_BINARY);
+
       /* Print the environment and exit.  */
-      char *const *e = environ;
-      while (*e)
-        printf ("%s%c", *e++, opt_nul_terminate_output ? '\0' : '\n');
+      for (char *const *e = environ; *e; ++e)
+        print_envvar (*e, terminator, quote_output);
+#ifdef lint
+      if (env_vector_active)
+        {
+          environ = initial_environ;
+          free (env_vector.variable);
+          free (env0_from_buffer);
+        }
+#endif
       return EXIT_SUCCESS;
     }
 
@@ -882,27 +1235,34 @@ main (int argc, char **argv)
 
   if (newdir)
     {
-      devmsg ("chdir:    %s\n", quoteaf (newdir));
+      vmsg (_("change dir: %s\n"), quote (newdir));
 
       if (chdir (newdir) != 0)
-        die (EXIT_CANCELED, errno, _("cannot change directory to %s"),
-             quoteaf (newdir));
+        error (EXIT_CANCELED, errno, _("cannot change directory to %s"),
+               quoteaf (newdir));
+    }
+
+  char *program = argv[optind];
+  if (argv0)
+    {
+      vmsg ("argv0:     %s\n", quote (argv0));
+      argv[optind] = argv0;
     }
 
   if (dev_debug)
     {
-      devmsg ("executing: %s\n", argv[optind]);
+      vmsg (_("executing: %s\n"), quote (program));
       for (int i=optind; i<argc; ++i)
-        devmsg ("   arg[%d]= %s\n", i-optind, quote (argv[i]));
+        vmsg ("   arg[%d]= %s\n", i-optind, quote (argv[i]));
     }
 
-  execvp (argv[optind], &argv[optind]);
+  execvp (program, &argv[optind]);
 
   int exit_status = errno == ENOENT ? EXIT_ENOENT : EXIT_CANNOT_INVOKE;
-  error (0, errno, "%s", quote (argv[optind]));
+  error (0, errno, "%s", quote (program));
 
-  if (exit_status == EXIT_ENOENT && strpbrk (argv[optind], C_ISSPACE_CHARS))
+  if (exit_status == EXIT_ENOENT && strpbrk (program, C_ISSPACE_CHARS))
     error (0, 0, _("use -[v]S to pass options in shebang lines"));
 
-  return exit_status;
+  main_exit (exit_status);
 }

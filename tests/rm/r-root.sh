@@ -1,7 +1,7 @@
 #!/bin/sh
 # Try to remove '/' recursively.
 
-# Copyright (C) 2013-2021 Free Software Foundation, Inc.
+# Copyright (C) 2013-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@ print_ver_ rm
 # enter the unlinkat() system call.  Therefore, limit the risk as much
 # as possible -- if there's a bug this test would wipe the system out!
 
-# Faint-hearted: skip this test for the 'root' user.
+# Fainthearted: skip this test for the 'root' user.
 skip_if_root_
 
 # Pull the teeth from rm(1) by intercepting the unlinkat() system call via the
@@ -41,6 +41,11 @@ unset CU_TEST_SKIP_EXIT
 USE_GDB=1
 
 if test $USE_GDB = 1; then
+  case $host_os in
+    darwin*) skip_ 'avoiding due to potentially non functioning gdb' ;;
+    *) ;;
+  esac
+
   # Use gdb to provide further protection by limiting calls to unlinkat().
   ( timeout 10s gdb --version ) > gdb.out 2>&1
   case $(cat gdb.out) in
@@ -80,7 +85,7 @@ gcc_shared_ k.c k.so \
   || framework_failure_ 'failed to build shared library'
 
 # Note breakpoint commands don't work in batch mode
-# https://sourceware.org/bugzilla/show_bug.cgi?id=10079
+# https://sourceware.org/PR10079
 # So we use python to script behavior upon hitting the breakpoint
 cat > bp.py <<'EOF.py' || framework_failure_
 def breakpoint_handler (event):

@@ -1,7 +1,7 @@
 #!/bin/sh
 # make sure chown --from=... works
 
-# Copyright (C) 2001-2021 Free Software Foundation, Inc.
+# Copyright (C) 2001-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -20,6 +20,13 @@
 print_ver_ chown
 require_root_
 
+# Numeric user names must not resolve to different user IDs.
+for user in 0 2 42 43; do
+  uid=$(id -u "$user" 2>/dev/null) || continue
+  test "$uid" = "$user" ||
+    skip_ "user name '$user' resolves to UID $uid"
+done
+
 touch f || framework_failure_
 
 chown -R --preserve-root 0:1 f
@@ -30,7 +37,7 @@ set _ $(ls -n f); shift; test "$3:$4" = 0:1 || fail=1
 # Make sure the correct diagnostic is output
 # Note we output a name even though an id was specified.
 chown -v --from=42 43 f > out || fail=1
-printf "ownership of 'f' retained as $(id -nu)\n" > exp
+printf "ownership of 'f' retained as $(id -nu 0)\n" > exp
 compare exp out || fail=1
 
 # Ensure diagnostics work for non existent files.
@@ -55,5 +62,16 @@ set _ $(ls -n f);     shift; test "$3:$4" = 2:10 || fail=1
 chown --no-dereference --from=0:1 2:010 slink || fail=1
 # owner/group on the symlink should be changed
 set _ $(ls -n slink); shift; test "$3:$4" = 2:10 || fail=1
+
+# Likewise for a symlink to a directory: --no-dereference must operate
+# on the link itself, not descend into the target directory.
+mkdir d || framework_failure_
+chown 2:10 d || fail=1
+ln -s d dlink || framework_failure_
+chown --no-dereference 0:1 dlink || fail=1
+# owner/group on the symlink should be set
+set _ $(ls -n dlink); shift; test "$3:$4" = 0:1  || fail=1
+# owner/group on the target directory should remain unchanged
+set _ $(ls -dn d);    shift; test "$3:$4" = 2:10 || fail=1
 
 Exit $fail

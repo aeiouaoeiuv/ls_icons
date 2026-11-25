@@ -1,5 +1,5 @@
 /* find-mount-point.c -- find the root mount point for a file.
-   Copyright (C) 2010-2021 Free Software Foundation, Inc.
+   Copyright (C) 2010-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,8 +18,6 @@
 #include <sys/types.h>
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "save-cwd.h"
 #include "xgetcwd.h"
 #include "find-mount-point.h"
@@ -54,14 +52,12 @@ find_mount_point (char const *file, struct stat const *file_stat)
   else
     /* FILE is some other kind of file; use its directory.  */
     {
-      char *xdir = dir_name (file);
-      char *dir;
-      ASSIGN_STRDUPA (dir, xdir);
-      free (xdir);
+      char *dir = dir_name (file);
 
       if (chdir (dir) < 0)
         {
           error (0, errno, _("cannot change to directory %s"), quoteaf (dir));
+          free (dir);
           return NULL;
         }
 
@@ -69,8 +65,11 @@ find_mount_point (char const *file, struct stat const *file_stat)
         {
           error (0, errno, _("cannot stat current directory (now %s)"),
                  quoteaf (dir));
+          free (dir);
           goto done;
         }
+
+      free (dir);
     }
 
   /* Now walk up FILE's parents until we find another file system or /,
@@ -103,8 +102,8 @@ done:
   {
     int save_errno = errno;
     if (restore_cwd (&cwd) != 0)
-      die (EXIT_FAILURE, errno,
-           _("failed to return to initial working directory"));
+      error (EXIT_FAILURE, errno,
+             _("failed to return to initial working directory"));
     free_cwd (&cwd);
     errno = save_errno;
   }

@@ -1,6 +1,6 @@
 /* Generate random permutations.
 
-   Copyright (C) 2006-2021 Free Software Foundation, Inc.
+   Copyright (C) 2006-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,27 +22,14 @@
 #include "randperm.h"
 
 #include <limits.h>
+#include <stdbit.h>
+#include <stdckdint.h>
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "count-leading-zeros.h"
+#include "attribute.h"
 #include "hash.h"
-#include "verify.h"
 #include "xalloc.h"
-
-/* Return the floor of the log base 2 of N.  If N is zero, return -1.  */
-
-static int _GL_ATTRIBUTE_CONST
-floor_lg (size_t n)
-{
-  verify (SIZE_WIDTH <= ULLONG_WIDTH);
-  return (n == 0 ? -1
-          : SIZE_WIDTH <= UINT_WIDTH
-          ? UINT_WIDTH - 1 - count_leading_zeros (n)
-          : SIZE_WIDTH <= ULONG_WIDTH
-          ? ULONG_WIDTH - 1 - count_leading_zeros_l (n)
-          : ULLONG_WIDTH - 1 - count_leading_zeros_ll (n));
-}
 
 /* Return an upper bound on the number of random bytes needed to
    generate the first H elements of a random permutation of N
@@ -53,13 +40,15 @@ randperm_bound (size_t h, size_t n)
 {
   /* Upper bound on number of bits needed to generate the first number
      of the permutation.  */
-  uintmax_t lg_n = floor_lg (n) + 1;
+  unsigned int lg_n = stdc_bit_width (n) + 1;
 
-  /* Upper bound on number of bits needed to generated the first H elements.  */
-  uintmax_t ar = lg_n * h;
+  /* Upper bound on number of bits needed to generate the first H elements.  */
+  uintmax_t ar;
+  if (ckd_mul (&ar, lg_n, h))
+    return SIZE_MAX;
 
   /* Convert the bit count to a byte count.  */
-  size_t bound = (ar + CHAR_BIT - 1) / CHAR_BIT;
+  size_t bound = ar / CHAR_BIT + (ar % CHAR_BIT != 0);
 
   return bound;
 }
@@ -117,7 +106,7 @@ sparse_new (size_t size_hint)
    index I in array V.  */
 
 static void
-sparse_swap (sparse_map *sv, size_t* v, size_t i, size_t j)
+sparse_swap (sparse_map *sv, size_t *v, size_t i, size_t j)
 {
   struct sparse_ent_ *v1 = hash_remove (sv, &(struct sparse_ent_) {i,0});
   struct sparse_ent_ *v2 = hash_remove (sv, &(struct sparse_ent_) {j,0});

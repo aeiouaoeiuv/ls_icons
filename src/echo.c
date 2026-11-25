@@ -1,5 +1,5 @@
 /* echo.c, derived from code echo.c in Bash.
-   Copyright (C) 1987-2021 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -16,9 +16,10 @@
 
 #include <config.h>
 #include <stdio.h>
-#include <assert.h>
 #include <sys/types.h>
 #include "system.h"
+#include "assure.h"
+#include "c-ctype.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "echo"
@@ -37,7 +38,7 @@ usage (int status)
 {
   /* STATUS should always be EXIT_SUCCESS (unlike in most other
      utilities which would call emit_try_help otherwise).  */
-  assert (status == EXIT_SUCCESS);
+  affirm (status == EXIT_SUCCESS);
 
   printf (_("\
 Usage: %s [SHORT-OPTION]... [STRING]...\n\
@@ -46,18 +47,26 @@ Usage: %s [SHORT-OPTION]... [STRING]...\n\
   fputs (_("\
 Echo the STRING(s) to standard output.\n\
 \n\
-  -n             do not output the trailing newline\n\
 "), stdout);
-  fputs (_(DEFAULT_ECHO_TO_XPG
+  oputs (_("\
+  -n     do not output the trailing newline\n\
+"));
+  oputs (_(DEFAULT_ECHO_TO_XPG
            ? N_("\
-  -e             enable interpretation of backslash escapes (default)\n\
-  -E             disable interpretation of backslash escapes\n")
+  -e     enable interpretation of backslash escapes (default)\n\
+")
            : N_("\
-  -e             enable interpretation of backslash escapes\n\
-  -E             disable interpretation of backslash escapes (default)\n")),
-         stdout);
-  fputs (HELP_OPTION_DESCRIPTION, stdout);
-  fputs (VERSION_OPTION_DESCRIPTION, stdout);
+  -e     enable interpretation of backslash escapes\n\
+")));
+  oputs (_(DEFAULT_ECHO_TO_XPG
+           ? N_("\
+  -E     disable interpretation of backslash escapes\n\
+")
+           : N_("\
+  -E     disable interpretation of backslash escapes (default)\n\
+")));
+  oputs (HELP_OPTION_DESCRIPTION);
+  oputs (VERSION_OPTION_DESCRIPTION);
   fputs (_("\
 \n\
 If -e is in effect, the following sequences are recognized:\n\
@@ -65,7 +74,7 @@ If -e is in effect, the following sequences are recognized:\n\
 "), stdout);
   fputs (_("\
   \\\\      backslash\n\
-  \\a      alert (BEL)\n\
+  \\a      alert (bell)\n\
   \\b      backspace\n\
   \\c      produce no further output\n\
   \\e      escape\n\
@@ -80,6 +89,10 @@ If -e is in effect, the following sequences are recognized:\n\
   \\xHH    byte with hexadecimal value HH (1 to 2 digits)\n\
 "), stdout);
   printf (USAGE_BUILTIN_WARNING, PROGRAM_NAME);
+  fputs (_("\n\
+Consider using the printf(1) command instead,\n\
+as it avoids problems when outputting option-like strings.\n\
+"), stdout);
   emit_ancillary_info (PROGRAM_NAME);
   exit (status);
 }
@@ -111,7 +124,7 @@ main (int argc, char **argv)
   bool posixly_correct = !!getenv ("POSIXLY_CORRECT");
   bool allow_options =
     (! posixly_correct
-     || (! DEFAULT_ECHO_TO_XPG && 1 < argc && STREQ (argv[1], "-n")));
+     || (! DEFAULT_ECHO_TO_XPG && 1 < argc && streq (argv[1], "-n")));
 
   /* System V machines already have a /bin/sh with a v9 behavior.
      Use the identical behavior for these machines so that the
@@ -130,10 +143,10 @@ main (int argc, char **argv)
      order to avoid accepting abbreviations.  */
   if (allow_options && argc == 2)
     {
-      if (STREQ (argv[1], "--help"))
+      if (streq (argv[1], "--help"))
         usage (EXIT_SUCCESS);
 
-      if (STREQ (argv[1], "--version"))
+      if (streq (argv[1], "--version"))
         {
           version_etc (stdout, PROGRAM_NAME, PACKAGE_NAME, Version, AUTHORS,
                        (char *) NULL);
@@ -215,12 +228,12 @@ just_echo:
                     case 'x':
                       {
                         unsigned char ch = *s;
-                        if (! isxdigit (ch))
+                        if (! c_isxdigit (ch))
                           goto not_an_escape;
                         s++;
                         c = hextobin (ch);
                         ch = *s;
-                        if (isxdigit (ch))
+                        if (c_isxdigit (ch))
                           {
                             s++;
                             c = c * 16 + hextobin (ch);

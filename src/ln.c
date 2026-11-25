@@ -1,5 +1,5 @@
 /* 'ln' program to create links between files.
-   Copyright (C) 1986-2021 Free Software Foundation, Inc.
+   Copyright (C) 1986-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,26 +23,18 @@
 
 #include "system.h"
 #include "backupfile.h"
-#include "die.h"
-#include "error.h"
 #include "fcntl-safer.h"
 #include "filenamecat.h"
 #include "file-set.h"
 #include "force-link.h"
 #include "hash.h"
-#include "hash-triple.h"
+#include "hashcode-file.h"
 #include "priv-set.h"
 #include "relpath.h"
 #include "same.h"
 #include "unlinkdir.h"
 #include "yesno.h"
 #include "canonicalize.h"
-
-#ifdef O_PATH
-enum { O_PATHSEARCH = O_PATH };
-#else
-enum { O_PATHSEARCH = O_SEARCH };
-#endif
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "ln"
@@ -126,6 +118,7 @@ errnoize (int status)
 }
 
 /* Return FROM represented as relative to the dir of TARGET.
+   Fall back to an absolute name, or return NULL with errno set.
    The result is malloced.  */
 
 static char *
@@ -153,6 +146,8 @@ convert_abs_rel (char const *from, char const *target)
 
   free (targetdir);
   free (realdest);
+  if (!relative_from && !IS_ABSOLUTE_FILE_NAME (from))
+    return realfrom;
   free (realfrom);
 
   return relative_from ? relative_from : xstrdup (from);
@@ -215,8 +210,17 @@ do_link (char const *source, int destdir_fd, char const *dest_base,
           return false;
         }
 
-      if (relative)
-        source = rel_source = convert_abs_rel (source, dest);
+      /* Determine REL_SOURCE before any backup of DEST.  */
+      if (relative && *source)
+        {
+          rel_source = convert_abs_rel (source, dest);
+          if (!rel_source)
+            {
+              error (0, errno, _("failed to create symbolic link %s -> %s"),
+                     quoteaf_n (0, dest), quoteaf_n (1, source));
+              return false;
+            }
+        }
 
       bool force = (remove_existing_files || interactive
                     || backup_type != no_backups);
@@ -267,7 +271,7 @@ do_link (char const *source, int destdir_fd, char const *dest_base,
                   if (source_status != 0)
                     source_status = stat (source, &source_stats);
                   if (source_status == 0
-                      && SAME_INODE (source_stats, dest_stats)
+                      && psame_inode (&source_stats, &dest_stats)
                       && (source_stats.st_nlink == 1
                           || same_nameat (AT_FDCWD, source,
                                           destdir_fd, dest_base)))
@@ -287,25 +291,19 @@ do_link (char const *source, int destdir_fd, char const *dest_base,
                       if (!yesno ())
                         {
                           free (rel_source);
-                          return true;
+                          return false;
                         }
                     }
 
                   if (backup_type != no_backups)
                     {
-                      backup_base = find_backup_file_name (destdir_fd,
-                                                           dest_base,
-                                                           backup_type);
-                      if (renameat (destdir_fd, dest_base,
-                                    destdir_fd, backup_base)
-                          != 0)
+                      backup_base = backup_file_rename (destdir_fd, dest_base,
+                                                        backup_type);
+                      if (! backup_base)
                         {
-                          int rename_errno = errno;
-                          free (backup_base);
-                          backup_base = NULL;
-                          if (rename_errno != ENOENT)
+                          if (errno != ENOENT)
                             {
-                              error (0, rename_errno, _("cannot backup %s"),
+                              error (0, errno, _("cannot backup %s"),
                                      quoteaf (dest));
                               goto fail;
                             }
@@ -316,6 +314,12 @@ do_link (char const *source, int destdir_fd, char const *dest_base,
             }
         }
 
+      /* The above backup checks interpret SOURCE relative to the current
+         working directory.  Now that they are done, we can update SOURCE
+         to REL_SOURCE.  */
+      if (rel_source)
+        source = rel_source;
+
       /* If the attempt to create a link fails and we are removing or
          backing up destinations, unlink the destination and try again.
 
@@ -323,7 +327,7 @@ do_link (char const *source, int destdir_fd, char const *dest_base,
          to link A to B.  But strictly following this has the counterintuitive
          effect of losing the contents of B if A does not exist.  Fortunately,
          POSIX 2008 clarified that an application is free to fail early if it
-         can prove that continuing onwards cannot succeed, so we can try to
+         can prove that continuing onward cannot succeed, so we can try to
          link A to B before blindly unlinking B, thus sometimes attempting to
          link a second time during a successful 'ln -f A B'.
 
@@ -377,18 +381,31 @@ do_link (char const *source, int destdir_fd, char const *dest_base,
     }
   else
     {
-      error (0, link_errno,
-             (symbolic_link
-              ? (link_errno != ENAMETOOLONG && *source
-                 ? _("failed to create symbolic link %s")
-                 : _("failed to create symbolic link %s -> %s"))
-              : (link_errno == EMLINK
-                 ? _("failed to create hard link to %.0s%s")
-                 : (link_errno == EDQUOT || link_errno == EEXIST
-                    || link_errno == ENOSPC || link_errno == EROFS)
-                 ? _("failed to create hard link %s")
-                 : _("failed to create hard link %s => %s"))),
-             quoteaf_n (0, dest), quoteaf_n (1, source));
+      char *dest_quoted = quoteaf_n (0, dest);
+      char *source_quoted = quoteaf_n (1, source);
+
+      if (symbolic_link)
+        {
+          if (link_errno != ENAMETOOLONG && *source)
+            error (0, link_errno, _("failed to create symbolic link %s"),
+                   dest_quoted);
+          else
+            error (0, link_errno, _("failed to create symbolic link %s -> %s"),
+                   dest_quoted, source_quoted);
+        }
+      else
+        {
+          if (link_errno == EMLINK)
+            error (0, link_errno, _("failed to create hard link to %s"),
+                   source_quoted);
+          else if (link_errno == EDQUOT || link_errno == EEXIST
+                   || link_errno == ENOSPC || link_errno == EROFS)
+            error (0, link_errno, _("failed to create hard link %s"),
+                   dest_quoted);
+          else
+            error (0, link_errno, _("failed to create hard link %s => %s"),
+                   dest_quoted, source_quoted);
+        }
 
       if (backup_base)
         {
@@ -433,32 +450,66 @@ interpreted in relation to its parent directory.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-      --backup[=CONTROL]      make a backup of each existing destination file\n\
-  -b                          like --backup but does not accept an argument\n\
-  -d, -F, --directory         allow the superuser to attempt to hard link\n\
-                                directories (note: will probably fail due to\n\
-                                system restrictions, even for the superuser)\n\
-  -f, --force                 remove existing destination files\n\
-"), stdout);
-      fputs (_("\
-  -i, --interactive           prompt whether to remove destinations\n\
-  -L, --logical               dereference TARGETs that are symbolic links\n\
-  -n, --no-dereference        treat LINK_NAME as a normal file if\n\
-                                it is a symbolic link to a directory\n\
-  -P, --physical              make hard links directly to symbolic links\n\
-  -r, --relative              with -s, create links relative to link location\n\
-  -s, --symbolic              make symbolic links instead of hard links\n\
-"), stdout);
-      fputs (_("\
-  -S, --suffix=SUFFIX         override the usual backup suffix\n\
-  -t, --target-directory=DIRECTORY  specify the DIRECTORY in which to create\n\
-                                the links\n\
-  -T, --no-target-directory   treat LINK_NAME as a normal file always\n\
-  -v, --verbose               print name of each linked file\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+      --backup[=CONTROL]\n\
+         make a backup of each existing destination file\n\
+"));
+      oputs (_("\
+  -b\n\
+         like --backup but does not accept an argument\n\
+"));
+      oputs (_("\
+  -d, -F, --directory\n\
+         allow the superuser to attempt to hard link directories,\n\
+         if supported by the system\n\
+"));
+      oputs (_("\
+  -f, --force\n\
+         remove existing destination files\n\
+"));
+      oputs (_("\
+  -i, --interactive\n\
+         prompt whether to remove destinations\n\
+"));
+      oputs (_("\
+  -L, --logical\n\
+         dereference TARGETs that are symbolic links\n\
+"));
+      oputs (_("\
+  -n, --no-dereference\n\
+         treat LINK_NAME as a normal file\n\
+         if it is a symbolic link to a directory\n\
+"));
+      oputs (_("\
+  -P, --physical\n\
+         make hard links directly to symbolic links\n\
+"));
+      oputs (_("\
+  -r, --relative\n\
+         with -s, create links relative to link location\n\
+"));
+      oputs (_("\
+  -s, --symbolic\n\
+         make symbolic links instead of hard links\n\
+"));
+      oputs (_("\
+  -S, --suffix=SUFFIX\n\
+         override the usual backup suffix\n\
+"));
+      oputs (_("\
+  -t, --target-directory=DIRECTORY\n\
+         specify the DIRECTORY in which to create the links\n\
+"));
+      oputs (_("\
+  -T, --no-target-directory\n\
+         treat LINK_NAME as a normal file always\n\
+"));
+      oputs (_("\
+  -v, --verbose\n\
+         print name of each linked file\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_backup_suffix_note ();
       printf (_("\
 \n\
@@ -493,10 +544,8 @@ main (int argc, char **argv)
 
   atexit (close_stdin);
 
-  symbolic_link = remove_existing_files = interactive = verbose
-    = hard_dir_link = false;
-
-  while ((c = getopt_long (argc, argv, "bdfinrst:vFLPS:T", long_options, NULL))
+  while ((c = getopt_long (argc, argv, "bdfinrst:vFLPS:T",
+                           long_options, NULL))
          != -1)
     {
       switch (c)
@@ -535,16 +584,16 @@ main (int argc, char **argv)
           break;
         case 't':
           if (target_directory)
-            die (EXIT_FAILURE, 0, _("multiple target directories specified"));
+            error (EXIT_FAILURE, 0, _("multiple target directories specified"));
           else
             {
               struct stat st;
               if (stat (optarg, &st) != 0)
-                die (EXIT_FAILURE, errno, _("failed to access %s"),
-                     quoteaf (optarg));
+                error (EXIT_FAILURE, errno, _("failed to access %s"),
+                       quoteaf (optarg));
               if (! S_ISDIR (st.st_mode))
-                die (EXIT_FAILURE, 0, _("target %s is not a directory"),
-                     quoteaf (optarg));
+                error (EXIT_FAILURE, 0, _("target %s is not a directory"),
+                       quoteaf (optarg));
             }
           target_directory = optarg;
           break;
@@ -576,7 +625,7 @@ main (int argc, char **argv)
     }
 
   if (relative && !symbolic_link)
-    die (EXIT_FAILURE, 0, _("cannot do --relative without --symbolic"));
+    error (EXIT_FAILURE, 0, _("cannot do --relative without --symbolic"));
 
   if (!hard_dir_link)
     {
@@ -587,9 +636,9 @@ main (int argc, char **argv)
   if (no_target_directory)
     {
       if (target_directory)
-        die (EXIT_FAILURE, 0,
-             _("cannot combine --target-directory "
-               "and --no-target-directory"));
+        error (EXIT_FAILURE, 0,
+               _("cannot combine --target-directory (-t) "
+                 "and --no-target-directory (-T)"));
       if (n_files != 2)
         {
           if (n_files < 2)
@@ -618,25 +667,13 @@ main (int argc, char **argv)
           int flags = (O_PATHSEARCH | O_DIRECTORY
                        | (dereference_dest_dir_symlinks ? 0 : O_NOFOLLOW));
           destdir_fd = openat_safer (AT_FDCWD, d, flags);
-          int err = errno;
-          if (!O_DIRECTORY && 0 <= destdir_fd)
-            {
-              struct stat st;
-              err = (fstat (destdir_fd, &st) != 0 ? errno
-                     : S_ISDIR (st.st_mode) ? 0 : ENOTDIR);
-              if (err != 0)
-                {
-                  close (destdir_fd);
-                  destdir_fd = -1;
-                }
-            }
           if (0 <= destdir_fd)
             {
               n_files -= !target_directory;
               target_directory = d;
             }
           else if (! (n_files == 2 && !target_directory))
-            die (EXIT_FAILURE, err, _("target %s"), quoteaf (d));
+            error (EXIT_FAILURE, errno, _("target %s"), quoteaf (d));
         }
     }
 
@@ -680,15 +717,9 @@ main (int argc, char **argv)
           ok &= do_link (file[i], destdir_fd, dest_base, dest, -1);
           free (dest);
         }
-
-#ifdef lint
-      if (dest_set)
-        hash_free (dest_set);
-      dest_set = NULL;
-#endif
     }
   else
     ok = do_link (file[0], AT_FDCWD, file[1], file[1], link_errno);
 
-  return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  main_exit (ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }

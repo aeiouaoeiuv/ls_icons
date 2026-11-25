@@ -1,6 +1,6 @@
 /* tac from a pipe.
 
-   Copyright (C) 1997-2021 Free Software Foundation, Inc.
+   Copyright (C) 1997-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -16,9 +16,7 @@
    along with this program.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* FIXME */
-#include <assert.h>
-
-#include "die.h"
+#include "assure.h"
 
 /* FIXME: this is small for testing */
 #define BUFFER_SIZE (8)
@@ -60,8 +58,7 @@ buf_init_from_stdin (Buf *x, char eol_byte)
 
   while (true)
     {
-      char *buf = (char *) malloc (BUFFER_SIZE);
-      size_t bytes_read;
+      char *buf = malloc (BUFFER_SIZE);
 
       if (buf == NULL)
         {
@@ -71,9 +68,9 @@ buf_init_from_stdin (Buf *x, char eol_byte)
           ok = false;
           break;
         }
-      bytes_read = full_read (STDIN_FILENO, buf, BUFFER_SIZE);
-      if (bytes_read != buffer_size && errno != 0)
-        die (EXIT_FAILURE, errno, _("read error"));
+      idx_t bytes_read = full_read (STDIN_FILENO, buf, BUFFER_SIZE);
+      if (bytes_read != BUFFER_SIZE && errno != 0)
+        error (EXIT_FAILURE, errno, _("read error"));
 
       {
         struct B_pair bp;
@@ -144,7 +141,7 @@ line_ptr_decrement (const Buf *x, const Line_ptr *lp)
     }
   else
     {
-      assert (lp->i > 0);
+      affirm (lp->i > 0);
       lp_new.i = lp->i - 1;
       lp_new.ptr = ONE_PAST_END (x, lp->i - 1) - 1;
     }
@@ -156,7 +153,7 @@ line_ptr_increment (const Buf *x, const Line_ptr *lp)
 {
   Line_ptr lp_new;
 
-  assert (lp->ptr <= ONE_PAST_END (x, lp->i) - 1);
+  affirm (lp->ptr <= ONE_PAST_END (x, lp->i) - 1);
   if (lp->ptr < ONE_PAST_END (x, lp->i) - 1)
     {
       lp_new.i = lp->i;
@@ -164,7 +161,7 @@ line_ptr_increment (const Buf *x, const Line_ptr *lp)
     }
   else
     {
-      assert (lp->i < x->n_bufs - 1);
+      affirm (lp->i < x->n_bufs - 1);
       lp_new.i = lp->i + 1;
       lp_new.ptr = x->p[lp->i + 1].start;
     }

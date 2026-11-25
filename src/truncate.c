@@ -1,5 +1,5 @@
 /* truncate -- truncate or extend the length of files.
-   Copyright (C) 2008-2021 Free Software Foundation, Inc.
+   Copyright (C) 2008-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -26,8 +26,6 @@
 #include <sys/types.h>
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "quote.h"
 #include "stat-size.h"
 #include "xdectoint.h"
@@ -35,7 +33,7 @@
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "truncate"
 
-#define AUTHORS proper_name ("Padraig Brady")
+#define AUTHORS proper_name_lite ("Padraig Brady", "P\303\241draig Brady")
 
 /* (-c) If true, don't create if not already there */
 static bool no_create;
@@ -80,17 +78,20 @@ reads as zero bytes.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
+      oputs (_("\
   -c, --no-create        do not create any files\n\
-"), stdout);
-      fputs (_("\
+"));
+      oputs (_("\
   -o, --io-blocks        treat SIZE as number of IO blocks instead of bytes\n\
-"), stdout);
-      fputs (_("\
+"));
+      oputs (_("\
   -r, --reference=RFILE  base size on RFILE\n\
-  -s, --size=SIZE        set or adjust the file size by SIZE bytes\n"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+"));
+      oputs (_("\
+  -s, --size=SIZE        set or adjust the file size by SIZE bytes\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_size_note ();
       fputs (_("\n\
 SIZE may also be prefixed by one of the following modifying characters:\n\
@@ -116,13 +117,12 @@ do_ftruncate (int fd, char const *fname, off_t ssize, off_t rsize,
     }
   if (block_mode)
     {
-      ptrdiff_t blksize = ST_BLKSIZE (sb);
+      ptrdiff_t blksize = STP_BLKSIZE (&sb);
       intmax_t ssize0 = ssize;
-      if (INT_MULTIPLY_WRAPV (ssize, blksize, &ssize))
+      if (ckd_mul (&ssize, ssize, blksize))
         {
           error (0, 0,
-                 _("overflow in %" PRIdMAX
-                   " * %" PRIdPTR " byte blocks for file %s"),
+                 _("overflow in %jd * %td byte blocks for file %s"),
                  ssize0, blksize, quoteaf (fname));
           return false;
         }
@@ -174,7 +174,7 @@ do_ftruncate (int fd, char const *fname, off_t ssize, off_t rsize,
               off_t r = fsize % ssize;
               ssize = r == 0 ? 0 : ssize - r;
             }
-          if (INT_ADD_WRAPV (fsize, ssize, &nsize))
+          if (ckd_add (&nsize, fsize, ssize))
             {
               error (0, 0, _("overflow extending size of file %s"),
                      quoteaf (fname));
@@ -187,11 +187,10 @@ do_ftruncate (int fd, char const *fname, off_t ssize, off_t rsize,
   if (nsize < 0)
     nsize = 0;
 
-  if (ftruncate (fd, nsize) == -1)      /* note updates mtime & ctime */
+  if (ftruncate (fd, nsize) != 0)
     {
-      error (0, errno,
-             _("failed to truncate %s at %" PRIdMAX " bytes"), quoteaf (fname),
-             (intmax_t) nsize);
+      error (0, errno, _("failed to truncate %s at %jd bytes"),
+             quoteaf (fname), (intmax_t) {nsize});
       return false;
     }
 
@@ -202,12 +201,10 @@ int
 main (int argc, char **argv)
 {
   bool got_size = false;
-  bool errors = false;
   off_t size IF_LINT ( = 0);
   off_t rsize = -1;
   rel_mode_t rel_mode = rm_abs;
-  int c, fd = -1, oflags;
-  char const *fname;
+  int c;
 
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
@@ -271,11 +268,11 @@ main (int argc, char **argv)
             }
           /* Support dd BLOCK size suffixes + lowercase g,t,m for bsd compat.
              Note we don't support dd's b=512, c=1, w=2 or 21x512MiB formats. */
-          size = xdectoimax (optarg, OFF_T_MIN, OFF_T_MAX, "EgGkKmMPtTYZ0",
+          size = xdectoimax (optarg, OFF_T_MIN, OFF_T_MAX, "EgGkKmMPQRtTYZ0",
                              _("Invalid number"), 0);
           /* Rounding to multiple of 0 is nonsensical */
           if ((rel_mode == rm_rup || rel_mode == rm_rdn) && size == 0)
-            die (EXIT_FAILURE, 0, _("division by zero"));
+            error (EXIT_FAILURE, 0, _("division by zero"));
           got_size = true;
           break;
 
@@ -324,12 +321,13 @@ main (int argc, char **argv)
       struct stat sb;
       off_t file_size = -1;
       if (stat (ref_file, &sb) != 0)
-        die (EXIT_FAILURE, errno, _("cannot stat %s"), quoteaf (ref_file));
+        error (EXIT_FAILURE, errno, _("cannot stat %s"), quoteaf (ref_file));
       if (usable_st_size (&sb))
         file_size = sb.st_size;
       else
         {
-          int ref_fd = open (ref_file, O_RDONLY);
+          /* O_NONBLOCK so we do not hang forever on a FIFO with no writer.  */
+          int ref_fd = open (ref_file, O_RDONLY | O_NONBLOCK);
           if (0 <= ref_fd)
             {
               off_t file_end = lseek (ref_fd, 0, SEEK_END);
@@ -345,19 +343,21 @@ main (int argc, char **argv)
             }
         }
       if (file_size < 0)
-        die (EXIT_FAILURE, errno, _("cannot get the size of %s"),
-             quoteaf (ref_file));
+        error (EXIT_FAILURE, errno, _("cannot get the size of %s"),
+               quoteaf (ref_file));
       if (!got_size)
         size = file_size;
       else
         rsize = file_size;
     }
 
-  oflags = O_WRONLY | (no_create ? 0 : O_CREAT) | O_NONBLOCK;
+  int oflags = O_WRONLY | (no_create ? 0 : O_CREAT) | O_NONBLOCK;
+  bool errors = false;
 
-  while ((fname = *argv++) != NULL)
+  for (char const *fname; (fname = *argv); argv++)
     {
-      if ((fd = open (fname, oflags, MODE_RW_UGO)) == -1)
+      int fd = open (fname, oflags, MODE_RW_UGO);
+      if (fd < 0)
         {
           /* 'truncate -s0 -c no-such-file'  shouldn't gen error
              'truncate -s0 no-such-dir/file' should gen ENOENT error
@@ -369,11 +369,8 @@ main (int argc, char **argv)
                      quoteaf (fname));
               errors = true;
             }
-          continue;
         }
-
-
-      if (fd != -1)
+      else
         {
           errors |= !do_ftruncate (fd, fname, size, rsize, rel_mode);
           if (close (fd) != 0)

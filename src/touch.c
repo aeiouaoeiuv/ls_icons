@@ -1,5 +1,5 @@
 /* touch -- change modification and access times of files
-   Copyright (C) 1987-2021 Free Software Foundation, Inc.
+   Copyright (C) 1987-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -21,12 +21,10 @@
 #include <stdio.h>
 #include <getopt.h>
 #include <sys/types.h>
-#include <assert.h>
 
 #include "system.h"
 #include "argmatch.h"
-#include "die.h"
-#include "error.h"
+#include "assure.h"
 #include "fd-reopen.h"
 #include "parse-datetime.h"
 #include "posixtm.h"
@@ -94,7 +92,7 @@ static struct option const longopts[] =
 };
 
 /* Valid arguments to the '--time' option. */
-static char const* const time_args[] =
+static char const *const time_args[] =
 {
   "atime", "access", "use", "mtime", "modify", NULL
 };
@@ -105,15 +103,15 @@ static int const time_masks[] =
   CH_ATIME, CH_ATIME, CH_ATIME, CH_MTIME, CH_MTIME
 };
 
-/* Store into *RESULT the result of interpreting FLEX_DATE as a date,
-   relative to NOW.  If NOW is null, use the current time.  */
+/* The interpretation of FLEX_DATE as a date, relative to NOW.  */
 
-static void
-get_reldate (struct timespec *result,
-             char const *flex_date, struct timespec const *now)
+static struct timespec
+date_relative (char const *flex_date, struct timespec now)
 {
-  if (! parse_datetime (result, flex_date, now))
-    die (EXIT_FAILURE, 0, _("invalid date format %s"), quote (flex_date));
+  struct timespec result;
+  if (! parse_datetime (&result, flex_date, &now))
+    error (EXIT_FAILURE, 0, _("invalid date format %s"), quote (flex_date));
+  return result;
 }
 
 /* Update the time of file FILE according to the options given.
@@ -126,7 +124,7 @@ touch (char const *file)
   int open_errno = 0;
   struct timespec const *t = newtime;
 
-  if (STREQ (file, "-"))
+  if (streq (file, "-"))
     fd = STDOUT_FILENO;
   else if (! (no_create || no_dereference))
     {
@@ -144,7 +142,7 @@ touch (char const *file)
         newtime[0].tv_nsec = UTIME_OMIT;
       else
         {
-          assert (change_times == CH_ATIME);
+          affirm (change_times == CH_ATIME);
           newtime[1].tv_nsec = UTIME_OMIT;
         }
     }
@@ -182,11 +180,12 @@ touch (char const *file)
          would give a bogus diagnostic for e.g., 'touch /' (assuming we
          don't own / or have write access).  On Solaris 10 and probably
          other systems, opening a directory like "." fails with EINVAL.
-         (On SunOS 4 it was EPERM but that's obsolete.)  */
+         (On SunOS 4 it was EPERM but that's obsolete.)  On macOS 26
+         opening "/" fails with EEXIST.  */
       struct stat st;
       if (open_errno
           && ! (open_errno == EISDIR
-                || (open_errno == EINVAL
+                || ((open_errno == EINVAL || open_errno == EEXIST)
                     && stat (file, &st) == 0 && S_ISDIR (st.st_mode))))
         {
           /* The wording of this diagnostic should cover at least two cases:
@@ -227,31 +226,48 @@ change the times of the file associated with standard output.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
-  -a                     change only the access time\n\
-  -c, --no-create        do not create any files\n\
-  -d, --date=STRING      parse STRING and use it instead of current time\n\
-  -f                     (ignored)\n\
-"), stdout);
-      fputs (_("\
-  -h, --no-dereference   affect each symbolic link instead of any referenced\n\
-                         file (useful only on systems that can change the\n\
-                         timestamps of a symlink)\n\
-  -m                     change only the modification time\n\
-"), stdout);
-      fputs (_("\
-  -r, --reference=FILE   use this file's times instead of current time\n\
-  -t STAMP               use [[CC]YY]MMDDhhmm[.ss] instead of current time\n\
-      --time=WORD        change the specified time:\n\
-                           WORD is access, atime, or use: equivalent to -a\n\
-                           WORD is modify or mtime: equivalent to -m\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
-      fputs (_("\
-\n\
-Note that the -d and -t options accept different time-date formats.\n\
-"), stdout);
+      oputs (_("\
+  -a\n\
+         change only the access time\n\
+"));
+      oputs (_("\
+  -c, --no-create\n\
+         do not create any files\n\
+"));
+      oputs (_("\
+  -d, --date=STRING\n\
+         parse STRING and use it instead of current time\n\
+"));
+      oputs (_("\
+  -f\n\
+         (ignored)\n\
+"));
+      oputs (_("\
+  -h, --no-dereference\n\
+         affect each symbolic link instead of any referenced file;\n\
+         useful only on systems that can change the timestamps of a symlink\n\
+"));
+      oputs (_("\
+  -m\n\
+         change only the modification time\n\
+"));
+      oputs (_("\
+  -r, --reference=FILE\n\
+         use this file's times instead of current time\n\
+"));
+      oputs (_("\
+  -t [[CC]YY]MMDDhhmm[.ss]\n\
+         use specified time instead of current time,\n\
+         with a date-time format that differs from -d's\n\
+"));
+      oputs (_("\
+      --time=WORD\n\
+         specify which time to change:\n\
+         access time (-a): 'access', 'atime', 'use';\n\
+         modification time (-m): 'modify', 'mtime'\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -260,9 +276,7 @@ Note that the -d and -t options accept different time-date formats.\n\
 int
 main (int argc, char **argv)
 {
-  int c;
   bool date_set = false;
-  bool ok = true;
   char const *flex_date = NULL;
 
   initialize_main (&argc, &argv);
@@ -273,9 +287,7 @@ main (int argc, char **argv)
 
   atexit (close_stdout);
 
-  change_times = 0;
-  no_create = use_ref = false;
-
+  int c;
   while ((c = getopt_long (argc, argv, "acd:fhmr:t:", longopts, NULL)) != -1)
     {
       switch (c)
@@ -311,8 +323,8 @@ main (int argc, char **argv)
         case 't':
           if (! posixtime (&newtime[0].tv_sec, optarg,
                            PDS_LEADING_YEAR | PDS_CENTURY | PDS_SECONDS))
-            die (EXIT_FAILURE, 0, _("invalid date format %s"),
-                 quote (optarg));
+            error (EXIT_FAILURE, 0, _("invalid date format %s"),
+                   quote (optarg));
           newtime[0].tv_nsec = 0;
           newtime[1] = newtime[0];
           date_set = true;
@@ -348,44 +360,40 @@ main (int argc, char **argv)
          might be an object-like macro.  */
       if (no_dereference ? lstat (ref_file, &ref_stats)
           : stat (ref_file, &ref_stats))
-        die (EXIT_FAILURE, errno,
-             _("failed to get attributes of %s"), quoteaf (ref_file));
+        error (EXIT_FAILURE, errno,
+               _("failed to get attributes of %s"), quoteaf (ref_file));
       newtime[0] = get_stat_atime (&ref_stats);
       newtime[1] = get_stat_mtime (&ref_stats);
       date_set = true;
       if (flex_date)
         {
           if (change_times & CH_ATIME)
-            get_reldate (&newtime[0], flex_date, &newtime[0]);
+            newtime[0] = date_relative (flex_date, newtime[0]);
           if (change_times & CH_MTIME)
-            get_reldate (&newtime[1], flex_date, &newtime[1]);
+            newtime[1] = date_relative (flex_date, newtime[1]);
         }
     }
   else
     {
       if (flex_date)
         {
-          struct timespec now;
-          gettime (&now);
-          get_reldate (&newtime[0], flex_date, &now);
-          newtime[1] = newtime[0];
+          struct timespec now = current_timespec ();
+          newtime[1] = newtime[0] = date_relative (flex_date, now);
           date_set = true;
 
           /* If neither -a nor -m is specified, treat "-d now" as if
              it were absent; this lets "touch" succeed more often in
              the presence of restrictive permissions.  */
           if (change_times == (CH_ATIME | CH_MTIME)
-              && newtime[0].tv_sec == now.tv_sec
-              && newtime[0].tv_nsec == now.tv_nsec)
+              && timespec_cmp (newtime[0], now) == 0)
             {
               /* Check that it really was "-d now", and not a timestamp
                  that just happens to be the current time.  */
               struct timespec notnow, notnow1;
               notnow.tv_sec = now.tv_sec ^ 1;
               notnow.tv_nsec = now.tv_nsec;
-              get_reldate (&notnow1, flex_date, &notnow);
-              if (notnow1.tv_sec == notnow.tv_sec
-                  && notnow1.tv_nsec == notnow.tv_nsec)
+              notnow1 = date_relative (flex_date, notnow);
+              if (timespec_cmp (notnow1, notnow) == 0)
                 date_set = false;
             }
         }
@@ -435,6 +443,7 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
+  bool ok = true;
   for (; optind < argc; ++optind)
     ok &= touch (argv[optind]);
 

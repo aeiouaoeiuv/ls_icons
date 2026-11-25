@@ -1,5 +1,5 @@
 /* tsort - topological sort.
-   Copyright (C) 1998-2021 Free Software Foundation, Inc.
+   Copyright (C) 1998-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,13 +22,11 @@
 
 #include <config.h>
 
-#include <assert.h>
+#include <getopt.h>
 #include <sys/types.h>
 
 #include "system.h"
-#include "long-options.h"
-#include "die.h"
-#include "error.h"
+#include "assure.h"
 #include "fadvise.h"
 #include "readtokens.h"
 #include "stdio--.h"
@@ -54,7 +52,8 @@ struct item
 {
   char const *str;
   struct item *left, *right;
-  int balance; /* -1, 0, or +1 */
+  signed char balance; /* -1, 0, or +1 */
+  bool printed;
   size_t count;
   struct item *qlink;
   struct successor *top;
@@ -89,8 +88,8 @@ Write totally ordered list consistent with the partial ordering in FILE.\n\
       fputs (_("\
 \n\
 "), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
 
@@ -101,22 +100,15 @@ Write totally ordered list consistent with the partial ordering in FILE.\n\
 static struct item *
 new_item (char const *str)
 {
-  struct item *k = xmalloc (sizeof *k);
-
-  k->str = (str ? xstrdup (str): NULL);
-  k->left = k->right = NULL;
-  k->balance = 0;
-
   /* T1. Initialize (COUNT[k] <- 0 and TOP[k] <- ^).  */
-  k->count = 0;
-  k->qlink = NULL;
-  k->top = NULL;
-
+  struct item *k = xzalloc (sizeof *k);
+  if (str)
+    k->str = xstrdup (str);
   return k;
 }
 
 /* Search binary tree rooted at *ROOT for STR.  Allocate a new tree if
-   *ROOT is NULL.  Insert a node/item for STR if not found.  Return
+   *ROOT is null.  Insert a node/item for STR if not found.  Return
    the node/item found/created for STR.
 
    This is done according to Algorithm A (Balanced tree search and
@@ -128,8 +120,6 @@ search_item (struct item *root, char const *str)
 {
   struct item *p, *q, *r, *s, *t;
   int a;
-
-  assert (root);
 
   /* Make sure the tree is not empty, since that is what the algorithm
      below expects.  */
@@ -143,7 +133,6 @@ search_item (struct item *root, char const *str)
   while (true)
     {
       /* A2. Compare.  */
-      assert (str && p && p->str);
       a = strcmp (str, p->str);
       if (a == 0)
         return p;
@@ -166,28 +155,30 @@ search_item (struct item *root, char const *str)
             p->right = q;
 
           /* A6. Adjust balance factors.  */
-          assert (str && s && s->str && !STREQ (str, s->str));
-          if (strcmp (str, s->str) < 0)
+          a = strcmp (str, s->str);
+          if (a < 0)
             {
               r = p = s->left;
               a = -1;
             }
           else
             {
+              affirm (0 < a);
               r = p = s->right;
               a = 1;
             }
 
           while (p != q)
             {
-              assert (str && p && p->str && !STREQ (str, p->str));
-              if (strcmp (str, p->str) < 0)
+              int cmp = strcmp (str, p->str);
+              if (cmp < 0)
                 {
                   p->balance = -1;
                   p = p->left;
                 }
               else
                 {
+                  affirm (0 < cmp);
                   p->balance = 1;
                   p = p->right;
                 }
@@ -264,7 +255,7 @@ search_item (struct item *root, char const *str)
       p = q;
     }
 
-  /* NOTREACHED */
+  affirm (false);
 }
 
 /* Record the fact that J precedes K.  */
@@ -274,7 +265,7 @@ record_relation (struct item *j, struct item *k)
 {
   struct successor *p;
 
-  if (!STREQ (j->str, k->str))
+  if (!streq (j->str, k->str))
     {
       k->count++;
       p = xmalloc (sizeof *p);
@@ -285,7 +276,7 @@ record_relation (struct item *j, struct item *k)
 }
 
 static bool
-count_items (struct item *unused _GL_UNUSED)
+count_items (MAYBE_UNUSED struct item *unused)
 {
   n_strings++;
   return false;
@@ -295,7 +286,7 @@ static bool
 scan_zeros (struct item *k)
 {
   /* Ignore strings that have already been printed.  */
-  if (k->count == 0 && k->str)
+  if (k->count == 0 && !k->printed)
     {
       if (head == NULL)
         head = k;
@@ -312,7 +303,7 @@ scan_zeros (struct item *k)
    loop, print the loop on standard error, remove a relation to break
    the loop, and return true.
 
-   The loop detection strategy is as follows: Realise that what we're
+   The loop detection strategy is as follows: Realize that what we're
    dealing with is essentially a directed graph.  If we find an item
    that is part of a graph that contains a cycle we traverse the graph
    in backwards direction.  In general there is no unique way to do
@@ -324,7 +315,7 @@ scan_zeros (struct item *k)
    are stored in the tree is not related to the specified partial
    ordering, we may need to walk the tree several times before the
    loop has completely been constructed.  If the loop was found, the
-   global variable LOOP will be NULL.  */
+   global variable LOOP will be null.  */
 
 static bool
 detect_loop (struct item *k)
@@ -358,8 +349,10 @@ detect_loop (struct item *k)
                           if (loop == k)
                             {
                               /* Remove relation.  */
-                              (*p)->suc->count--;
-                              *p = (*p)->next;
+                              struct successor *s = *p;
+                              s->suc->count--;
+                              *p = s->next;
+                              IF_LINT (free (s));
                               break;
                             }
 
@@ -430,23 +423,22 @@ walk_tree (struct item *root, bool (*action) (struct item *))
     recurse_tree (root->right, action);
 }
 
-/* Do a topological sort on FILE.   Return true if successful.  */
+/* Do a topological sort on FILE.  Exit with appropriate exit status.  */
 
-static bool
+static _Noreturn void
 tsort (char const *file)
 {
   bool ok = true;
-  struct item *root;
   struct item *j = NULL;
   struct item *k = NULL;
   token_buffer tokenbuffer;
-  bool is_stdin = STREQ (file, "-");
+  bool is_stdin = streq (file, "-");
 
-  /* Intialize the head of the tree will hold the strings we're sorting.  */
-  root = new_item (NULL);
+  /* Initialize the head of the tree holding the strings we're sorting.  */
+  struct item *root = new_item (NULL);
 
   if (!is_stdin && ! freopen (file, "r", stdin))
-    die (EXIT_FAILURE, errno, "%s", quotef (file));
+    error (EXIT_FAILURE, errno, "%s", quotef (file));
 
   fadvise (stdin, FADVISE_SEQUENTIAL);
 
@@ -457,9 +449,13 @@ tsort (char const *file)
       /* T2. Next Relation.  */
       size_t len = readtoken (stdin, DELIM, sizeof (DELIM) - 1, &tokenbuffer);
       if (len == (size_t) -1)
-        break;
+        {
+          if (ferror (stdin))
+            error (EXIT_FAILURE, errno, _("%s: read error"), quotef (file));
+          break;
+        }
 
-      assert (len != 0);
+      affirm (len != 0);
 
       k = search_item (root, tokenbuffer.buffer);
       if (j)
@@ -473,8 +469,8 @@ tsort (char const *file)
     }
 
   if (k != NULL)
-    die (EXIT_FAILURE, 0, _("%s: input contains an odd number of tokens"),
-         quotef (file));
+    error (EXIT_FAILURE, 0, _("%s: input contains an odd number of tokens"),
+           quotef (file));
 
   /* T1. Initialize (N <- n).  */
   walk_tree (root, count_items);
@@ -490,12 +486,7 @@ tsort (char const *file)
 
           /* T5. Output front of queue.  */
           puts (head->str);
-#ifdef lint
-          /* suppress valgrind "definitely lost" warnings.  */
-          void *head_str = (void *) head->str;
-          free (head_str);
-#endif
-          head->str = NULL;	/* Avoid printing the same string twice.  */
+          head->printed = true;
           n_strings--;
 
           /* T6. Erase relations.  */
@@ -529,20 +520,16 @@ tsort (char const *file)
         }
     }
 
-  IF_LINT (free (root));
-
   if (fclose (stdin) != 0)
-    die (EXIT_FAILURE, errno, "%s",
-         is_stdin ? _("standard input") : quotef (file));
+    error (EXIT_FAILURE, errno, "%s",
+           is_stdin ? _("standard input") : quotef (file));
 
-  return ok;
+  exit (ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }
 
 int
 main (int argc, char **argv)
 {
-  bool ok;
-
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   setlocale (LC_ALL, "");
@@ -551,9 +538,32 @@ main (int argc, char **argv)
 
   atexit (close_stdout);
 
-  parse_gnu_standard_options_only (argc, argv, PROGRAM_NAME, PACKAGE_NAME,
-                                   Version, true, usage, AUTHORS,
-                                   (char const *) NULL);
+  while (true)
+    {
+      static struct option const long_options[] =
+        {
+          {GETOPT_HELP_OPTION_DECL},
+          {GETOPT_VERSION_OPTION_DECL},
+          {NULL, 0, NULL, 0}
+        };
+      int c = getopt_long (argc, argv, "w", long_options, NULL);
+
+      if (c == -1)
+        break;
+
+      switch (c)
+        {
+        case 'w':
+          break;
+
+        case_GETOPT_HELP_CHAR;
+
+        case_GETOPT_VERSION_CHAR (PROGRAM_NAME, AUTHORS);
+
+        default:
+          usage (EXIT_FAILURE);
+        }
+    }
 
   if (1 < argc - optind)
     {
@@ -561,7 +571,5 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
-  ok = tsort (optind == argc ? "-" : argv[optind]);
-
-  return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  tsort (optind == argc ? "-" : argv[optind]);
 }

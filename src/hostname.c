@@ -1,5 +1,5 @@
 /* hostname - set or print the name of current host system
-   Copyright (C) 1994-2021 Free Software Foundation, Inc.
+   Copyright (C) 1994-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,8 +22,6 @@
 
 #include "system.h"
 #include "long-options.h"
-#include "die.h"
-#include "error.h"
 #include "quote.h"
 #include "xgethostname.h"
 
@@ -32,18 +30,22 @@
 
 #define AUTHORS proper_name ("Jim Meyering")
 
-#if !defined HAVE_SETHOSTNAME && defined HAVE_SYSINFO && \
-     defined HAVE_SYS_SYSTEMINFO_H
-# include <sys/systeminfo.h>
+#ifndef HAVE_SETHOSTNAME
+# if defined HAVE_SYSINFO && defined HAVE_SYS_SYSTEMINFO_H
+#  include <sys/systeminfo.h>
+# endif
 
 static int
-sethostname (char *name, size_t namelen)
+sethostname (char const *name, size_t namelen)
 {
+# if defined HAVE_SYSINFO && defined HAVE_SYS_SYSTEMINFO_H
   /* Using sysinfo() is the SVR4 mechanism to set a hostname. */
   return (sysinfo (SI_SET_HOSTNAME, name, namelen) < 0 ? -1 : 0);
+# else
+  errno = ENOTSUP;
+  return -1;
+# endif
 }
-
-# define HAVE_SETHOSTNAME 1  /* Now we have it... */
 #endif
 
 void
@@ -60,8 +62,8 @@ Print or set the hostname of the current system.\n\
 \n\
 "),
              program_name, program_name);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -84,34 +86,27 @@ main (int argc, char **argv)
                                    Version, true, usage, AUTHORS,
                                    (char const *) NULL);
 
-  if (argc == optind + 1)
+  if (optind + 1 < argc)
+     {
+       error (0, 0, _("extra operand %s"), quote (argv[optind + 1]));
+       usage (EXIT_FAILURE);
+     }
+
+  if (optind + 1 == argc)
     {
-#ifdef HAVE_SETHOSTNAME
       /* Set hostname to operand.  */
       char const *name = argv[optind];
       if (sethostname (name, strlen (name)) != 0)
-        die (EXIT_FAILURE, errno, _("cannot set name to %s"),
-             quote (name));
-#else
-      die (EXIT_FAILURE, 0,
-           _("cannot set hostname; this system lacks the functionality"));
-#endif
+        error (EXIT_FAILURE, errno, _("cannot set name to %s"),
+               quote (name));
     }
-
-  if (argc <= optind)
+  else
     {
       hostname = xgethostname ();
       if (hostname == NULL)
-        die (EXIT_FAILURE, errno, _("cannot determine hostname"));
+        error (EXIT_FAILURE, errno, _("cannot determine hostname"));
       puts (hostname);
-      IF_LINT (free (hostname));
     }
 
-  if (optind + 1 < argc)
-    {
-      error (0, 0, _("extra operand %s"), quote (argv[optind + 1]));
-      usage (EXIT_FAILURE);
-    }
-
-  return EXIT_SUCCESS;
+  main_exit (EXIT_SUCCESS);
 }

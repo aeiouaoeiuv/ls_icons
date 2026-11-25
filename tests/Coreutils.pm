@@ -1,7 +1,7 @@
 package Coreutils;
 # This is a testing framework.
 
-# Copyright (C) 1998-2021 Free Software Foundation, Inc.
+# Copyright (C) 1998-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@ use vars qw($VERSION @ISA @EXPORT);
 
 use FileHandle;
 use File::Compare qw(compare);
+use Text::ParseWords qw(shellwords);
 
 @ISA = qw(Exporter);
 ($VERSION = '$Revision: 1.5 $ ') =~ tr/[0-9].//cd;
@@ -41,6 +42,11 @@ my $Global_count = 1;
 # tests would fail.
 defined $ENV{DJDIR}
   and $ENV{SHELL} = "$ENV{DJDIR}/bin/bash.exe";
+
+# Perl 5.22.2 was seen to default to TERM=dumb on Solaris 11 OpenIndiana
+# So ensure this variable is unset.
+defined $ENV{TERM}
+  and delete $ENV{TERM};
 
 # A file spec: a scalar or a reference to a single-keyed hash
 # ================
@@ -74,8 +80,6 @@ defined $ENV{DJDIR}
 # {ERR_SUBST => 's/variable_output/expected_output/'}
 #   Transform actual stderr output before comparing it against expected.
 #   This is useful when verifying that we get a meaningful diagnostic.
-#   For example, in rm/fail-2eperm, we have to account for three different
-#   diagnostics: Operation not permitted, Not owner, and Permission denied.
 # {EXIT => N} expect exit status of cmd to be N
 # {ENV => 'VAR=val ...'}
 #   Prepend 'VAR=val ...' to the command that we execute via 'system'.
@@ -137,7 +141,7 @@ sub _compare_files ($$$$$)
       warn "$program_name: test $test_name: ${info}mismatch, comparing "
         . "$expected (expected) and $actual (actual)\n";
       # Ignore any failure, discard stderr.
-      system "diff -c $expected $actual 2>/dev/null";
+      system "diff -u $expected $actual 2>/dev/null";
     }
 
   return $differ;
@@ -208,7 +212,12 @@ sub getlimits()
 {
   my $NV;
   open $NV, "getlimits |" or die "Error running getlimits\n";
-  my %limits = map {split /=|\n/} <$NV>;
+  my %limits = map {
+    chomp;
+    my ($k, $v) = split /=/, $_, 2;
+    $v = (shellwords($v))[0] if defined $v;
+    ($k, $v)
+  } <$NV>;
   return \%limits;
 }
 

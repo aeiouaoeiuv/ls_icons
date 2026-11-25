@@ -1,5 +1,5 @@
 /* Create a temporary file or directory, safely.
-   Copyright (C) 2007-2021 Free Software Foundation, Inc.
+   Copyright (C) 2007-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,8 +23,6 @@
 #include "system.h"
 
 #include "close-stream.h"
-#include "die.h"
-#include "error.h"
 #include "filenamecat.h"
 #include "quote.h"
 #include "tempname.h"
@@ -74,29 +72,39 @@ If TEMPLATE is not specified, use tmp.XXXXXXXXXX, and --tmpdir is implied.\n\
 Files are created u+rw, and directories u+rwx, minus umask restrictions.\n\
 "), stdout);
       fputs ("\n", stdout);
-      fputs (_("\
-  -d, --directory     create a directory, not a file\n\
-  -u, --dry-run       do not create anything; merely print a name (unsafe)\n\
-  -q, --quiet         suppress diagnostics about file/dir-creation failure\n\
-"), stdout);
-      fputs (_("\
-      --suffix=SUFF   append SUFF to TEMPLATE; SUFF must not contain a slash.\n\
-                        This option is implied if TEMPLATE does not end in X\n\
-"), stdout);
-      fputs (_("\
-  -p DIR, --tmpdir[=DIR]  interpret TEMPLATE relative to DIR; if DIR is not\n\
-                        specified, use $TMPDIR if set, else /tmp.  With\n\
-                        this option, TEMPLATE must not be an absolute name;\n\
-                        unlike with -t, TEMPLATE may contain slashes, but\n\
-                        mktemp creates only the final component\n\
-"), stdout);
-      fputs (_("\
-  -t                  interpret TEMPLATE as a single file name component,\n\
-                        relative to a directory: $TMPDIR, if set; else the\n\
-                        directory specified via -p; else /tmp [deprecated]\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -d, --directory\n\
+         create a directory, not a file\n\
+"));
+      oputs (_("\
+  -u, --dry-run\n\
+         do not create anything; merely print a name (unsafe)\n\
+"));
+      oputs (_("\
+  -q, --quiet\n\
+         suppress diagnostics about file/dir-creation failure\n\
+"));
+      oputs (_("\
+      --suffix=SUFF\n\
+         append SUFF to TEMPLATE; SUFF must not contain a slash.\n\
+         This option is implied if TEMPLATE does not end in X\n\
+"));
+      oputs (_("\
+  -p DIR, --tmpdir[=DIR]\n\
+         interpret TEMPLATE relative to DIR;\n\
+         if DIR is not specified, use $TMPDIR if set, else /tmp.\n\
+         With this option, TEMPLATE must not be an absolute name;\n\
+         unlike with -t, TEMPLATE may contain slashes,\n\
+         but mktemp creates only the final component\n\
+"));
+      oputs (_("\
+  -t\n\
+         interpret TEMPLATE as a single file name component,\n\
+         relative to a directory: $TMPDIR, if set;\n\
+         else the directory specified via -p; else /tmp [deprecated]\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
 
@@ -107,7 +115,7 @@ static size_t
 count_consecutive_X_s (char const *s, size_t len)
 {
   size_t n = 0;
-  for ( ; len && s[len-1] == 'X'; len--)
+  for ( ; len && s[len - 1] == 'X'; len--)
     ++n;
   return n;
 }
@@ -149,7 +157,6 @@ main (int argc, char **argv)
   char const *dest_dir_arg = NULL;
   bool suppress_file_err = false;
   int c;
-  unsigned int n_args;
   char *template;
   char *suffix = NULL;
   bool use_dest_dir = false;
@@ -159,7 +166,7 @@ main (int argc, char **argv)
   int status = EXIT_SUCCESS;
   size_t x_count;
   size_t suffix_len;
-  char *dest_name;
+  char *dest_name = NULL;
 
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
@@ -205,7 +212,7 @@ main (int argc, char **argv)
         }
     }
 
-  n_args = argc - optind;
+  int n_args = argc - optind;
   if (2 <= n_args)
     {
       error (0, 0, _("too many templates"));
@@ -227,9 +234,9 @@ main (int argc, char **argv)
       size_t len = strlen (template);
       if (!len || template[len - 1] != 'X')
         {
-          die (EXIT_FAILURE, 0,
-               _("with --suffix, template %s must end in X"),
-               quote (template));
+          error (EXIT_FAILURE, 0,
+                 _("with --suffix, template %s must end in X"),
+                 quote (template));
         }
       suffix_len = strlen (suffix);
       dest_name = xcharalloc (len + suffix_len + 1);
@@ -252,13 +259,19 @@ main (int argc, char **argv)
   /* At this point, template is malloc'd, and suffix points into template.  */
   if (suffix_len && last_component (suffix) != suffix)
     {
-      die (EXIT_FAILURE, 0,
-           _("invalid suffix %s, contains directory separator"),
-           quote (suffix));
+      error (EXIT_FAILURE, 0,
+             _("invalid suffix %s, contains directory separator"),
+             quote (suffix));
     }
   x_count = count_consecutive_X_s (template, suffix - template);
   if (x_count < 3)
-    die (EXIT_FAILURE, 0, _("too few X's in template %s"), quote (template));
+    {
+      /* when suffix was appended to template only diagnose the template.  */
+      if (template == dest_name)
+        template[suffix - template] = '\0';
+      error (EXIT_FAILURE, 0, _("too few X's in template %s"),
+             quote (template));
+    }
 
   if (use_dest_dir)
     {
@@ -273,9 +286,9 @@ main (int argc, char **argv)
             dest_dir = "/tmp";
 
           if (last_component (template) != template)
-            die (EXIT_FAILURE, 0,
-                 _("invalid template, %s, contains directory separator"),
-                 quote (template));
+            error (EXIT_FAILURE, 0,
+                   _("invalid template, %s, contains directory separator"),
+                   quote (template));
         }
       else
         {
@@ -287,10 +300,10 @@ main (int argc, char **argv)
               dest_dir = (env && *env ? env : "/tmp");
             }
           if (IS_ABSOLUTE_FILE_NAME (template))
-            die (EXIT_FAILURE, 0,
-                 _("invalid template, %s; with --tmpdir,"
-                   " it may not be absolute"),
-                 quote (template));
+            error (EXIT_FAILURE, 0,
+                   _("invalid template, %s; with --tmpdir,"
+                     " it may not be absolute"),
+                   quote (template));
         }
 
       dest_name = file_name_concat (dest_dir, template, NULL);
@@ -334,17 +347,12 @@ main (int argc, char **argv)
       if (!dry_run && ((stdout_closed = true), close_stream (stdout) != 0))
         {
           int saved_errno = errno;
-          remove (dest_name);
+          (create_directory ? rmdir : unlink) (dest_name);
           if (!suppress_file_err)
             error (0, saved_errno, _("write error"));
           status = EXIT_FAILURE;
         }
     }
 
-#ifdef lint
-  free (dest_name);
-  free (template);
-#endif
-
-  return status;
+  main_exit (status);
 }

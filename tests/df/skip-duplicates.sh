@@ -2,7 +2,7 @@
 # Test df's behavior when the mount list contains duplicate entries.
 # This test is skipped on systems that lack LD_PRELOAD support; that's fine.
 
-# Copyright (C) 2012-2021 Free Software Foundation, Inc.
+# Copyright (C) 2012-2026 Free Software Foundation, Inc.
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -34,32 +34,31 @@ unique_entries=1
 test -z "$CU_NONROOT_FS" || unique_entries=$(expr $unique_entries + 1)
 test -z "$CU_REMOTE_FS" || unique_entries=$(expr $unique_entries + 2)
 
-grep '^#define HAVE_MNTENT_H 1' $CONFIG_HEADER > /dev/null \
-      || skip_ "no mntent.h available to confirm the interface"
-
 grep '^#define HAVE_GETMNTENT 1' $CONFIG_HEADER > /dev/null \
       || skip_ "getmntent is not used on this system"
 
 # Simulate an mtab file to test various cases.
-cat > k.c <<EOF || framework_failure_
+# Replace gnulib streq as that is not available here.
+sed 's/streq/0==str''cmp/' > k.c <<EOF || framework_failure_
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <mntent.h>
 #include <string.h>
+#include <stdarg.h>
 #include <dlfcn.h>
 
-#define STREQ(a, b) (strcmp (a, b) == 0)
+static FILE* (*fopen_func)(const char *, const char *);
 
 FILE* fopen(const char *path, const char *mode)
 {
-  static FILE* (*fopen_func)(char const *, char const *);
 
   /* get reference to original (libc provided) fopen */
   if (!fopen_func)
     {
-      fopen_func = (FILE*(*)(char const *, char const *))
+      fopen_func = (FILE*(*)(const char *, const char *))
                    dlsym(RTLD_NEXT, "fopen");
       if (!fopen_func)
         {
@@ -71,16 +70,49 @@ FILE* fopen(const char *path, const char *mode)
 
   /* Returning ENOENT here will get read_file_system_list()
      to fall back to using getmntent() below.  */
-  if (STREQ (path, "/proc/self/mountinfo"))
+  if (streq (path, "/proc/self/mountinfo"))
     {
       errno = ENOENT;
       return NULL;
     }
-  else
-    return fopen_func(path, mode);
+
+  return fopen_func(path, mode);
 }
 
-#define STREQ(a, b) (strcmp (a, b) == 0)
+int open(const char *path, int flags, ...)
+{
+  static int (*open_func)(const char *, int, ...);
+
+  /* get reference to original (libc provided) open */
+  if (!open_func)
+    {
+      open_func = (int(*)(const char *, int, ...))
+                   dlsym(RTLD_NEXT, "open");
+      if (!open_func)
+        {
+          fprintf (stderr, "Failed to find open()\n");
+          errno = ESRCH;
+          return -1;
+        }
+    }
+
+  /* Returning ENOENT here will get read_file_system_list()
+     to fall back to using getmntent() below.  */
+  if (streq (path, "/proc/self/mountinfo"))
+    {
+      errno = ENOENT;
+      return -1;
+    }
+
+  va_list ap;
+  va_start (ap, flags);
+  mode_t mode = (sizeof (mode_t) < sizeof (int)
+                 ? va_arg (ap, int)
+                 : va_arg (ap, mode_t));
+  va_end (ap);
+
+  return open_func(path, flags, mode);
+}
 
 struct mntent *getmntent (FILE *fp)
 {
@@ -91,7 +123,7 @@ struct mntent *getmntent (FILE *fp)
   /* Prove that LD_PRELOAD works. */
   if (!done)
     {
-      fclose (fopen ("x", "w"));
+      fclose (fopen_func ("x", "w"));
       ++done;
     }
 
@@ -104,6 +136,8 @@ struct mntent *getmntent (FILE *fp)
     {.mnt_fsname="virtfs2", .mnt_dir="/NONROOT", .mnt_type="t2", .mnt_opts=""},
     {.mnt_fsname="netns",   .mnt_dir="net:[1234567]",            .mnt_opts=""},
     {.mnt_fsname="rem:ote1",.mnt_dir="/REMOTE",                  .mnt_opts=""},
+    {.mnt_fsname="rem:ote1",.mnt_dir="/REMOTE",                  .mnt_opts=""},
+    {.mnt_fsname="rem:ote2",.mnt_dir="/REMOTE",                  .mnt_opts=""},
     {.mnt_fsname="rem:ote1",.mnt_dir="/REMOTE",                  .mnt_opts=""},
     {.mnt_fsname="rem:ote2",.mnt_dir="/REMOTE",                  .mnt_opts=""},
   };
@@ -120,15 +154,15 @@ struct mntent *getmntent (FILE *fp)
   if (done == 1 && !getenv ("CU_TEST_DUPE_INVALID"))
     done++;  /* skip the first entry.  */
 
-  while (done++ <= 10)
+  while (done++ <= 12)
     {
       if (!mntents[done-2].mnt_type)
         mntents[done-2].mnt_type = "-";
       if (!mntents[done-2].mnt_opts)
         mntents[done-2].mnt_opts = "-";
-      if (STREQ (mntents[done-2].mnt_dir, "/NONROOT"))
+      if (streq (mntents[done-2].mnt_dir, "/NONROOT"))
         mntents[done-2].mnt_dir = nonroot_fs;
-      if (STREQ (mntents[done-2].mnt_dir, "/REMOTE"))
+      if (streq (mntents[done-2].mnt_dir, "/REMOTE"))
         {
           if (!remote_fs || !*remote_fs)
             continue;
@@ -144,7 +178,7 @@ EOF
 
 # Then compile/link it:
 gcc_shared_ k.c k.so \
-  || framework_failure_ 'failed to build shared library'
+  || skip_ 'failed to build mntent shared library'
 
 # Test if LD_PRELOAD works:
 LD_PRELOAD=$LD_PRELOAD:./k.so df
@@ -178,7 +212,7 @@ test $(grep -c 'virtfs2.*t2' <out) -eq 1 || { fail=1; cat out; }
 
 # Ensure that filtering duplicates does not affect -a processing.
 LD_PRELOAD=$LD_PRELOAD:./k.so df -a >out || fail=1
-total_fs=6; test "$CU_REMOTE_FS" && total_fs=$(expr $total_fs + 3)
+total_fs=6; test "$CU_REMOTE_FS" && total_fs=$(expr $total_fs + 5)
 test $(wc -l <out) -eq $total_fs || { fail=1; cat out; }
 # Ensure placeholder "-" values used for the eclipsed "virtfs"
 test $(grep -c 'virtfs *-' <out) -eq 1 || { fail=1; cat out; }

@@ -1,5 +1,5 @@
 /* expr -- evaluate expressions.
-   Copyright (C) 1986-2021 Free Software Foundation, Inc.
+   Copyright (C) 1986-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -35,16 +35,14 @@
 
 #include <gmp.h>
 #include <regex.h>
-#include "die.h"
-#include "error.h"
+#include "c-ctype.h"
 #include "long-options.h"
-#include "mbuiter.h"
+#include "mcel.h"
 #include "strnumcmp.h"
-#include "xstrtol.h"
 
 /* Various parts of this code assume size_t fits into unsigned long
    int, the widest unsigned type that GMP supports.  */
-verify (SIZE_MAX <= ULONG_MAX);
+static_assert (SIZE_MAX <= ULONG_MAX);
 
 /* The official name of this program (e.g., no 'g' prefix).  */
 #define PROGRAM_NAME "expr"
@@ -116,46 +114,44 @@ static void printv (VALUE *v);
 static size_t
 mbs_logical_cspn (char const *s, char const *accept)
 {
-  size_t idx = 0;
-
   if (accept[0] == '\0')
     return 0;
 
   /* General case.  */
   if (MB_CUR_MAX > 1)
     {
-      mbui_iterator_t iter;
-
-      for (mbui_init (iter, s); mbui_avail (iter); mbui_advance (iter))
+      size_t idx = 0;
+      for (char const *p = s; *p; )
         {
           ++idx;
-          if (mb_len (mbui_cur (iter)) == 1)
+          mcel_t g = mcel_scanz (p);
+          if (g.len == 1)
             {
-              if (mbschr (accept, *mbui_cur_ptr (iter)))
+              if (mbschr (accept, *p))
                 return idx;
             }
           else
-            {
-              mbui_iterator_t aiter;
-
-              for (mbui_init (aiter, accept);
-                   mbui_avail (aiter);
-                   mbui_advance (aiter))
-                if (mb_equal (mbui_cur (aiter), mbui_cur (iter)))
+            for (char const *a = accept; *a; )
+              {
+                mcel_t h = mcel_scanz (a);
+                if (mcel_eq (g, h))
                   return idx;
-            }
+                a += h.len;
+              }
+          p += g.len;
         }
-
-      /* not found */
-      return 0;
     }
   else
     {
       /* single-byte locale,
          convert returned byte offset to 1-based index or zero if not found. */
       size_t i = strcspn (s, accept);
-      return (s[i] ? i + 1 : 0);
+      if (s[i])
+        return i + 1;
     }
+
+  /* not found */
+  return 0;
 }
 
 /* Extract the substring of S, from logical character
@@ -168,48 +164,43 @@ mbs_logical_cspn (char const *s, char const *accept)
 static char *
 mbs_logical_substr (char const *s, size_t pos, size_t len)
 {
-  char *v, *vlim;
-
-  size_t blen = strlen (s); /* byte length */
-  size_t llen = (MB_CUR_MAX > 1) ? mbslen (s) : blen; /* logical length */
-
-  if (llen < pos || pos == 0 || len == 0 || len == SIZE_MAX)
-    return xstrdup ("");
+  size_t mb_cur_max = MB_CUR_MAX;
+  idx_t llen = mb_cur_max <= 1 ? strlen (s) : mbslen (s); /* logical length */
 
   /* characters to copy */
-  size_t vlen = MIN (len, llen - pos + 1);
+  size_t vlen = MIN (len, pos <= llen ? llen - pos + 1 : 0);
 
-  if (MB_CUR_MAX == 1)
+  char const *substart = s;
+  idx_t sublen = 0;
+  if (pos == 0 || len == SIZE_MAX)
     {
-      /* Single-byte case */
-      v = xmalloc (vlen + 1);
-      vlim = mempcpy (v, s + pos - 1, vlen);
+      /* The request is invalid.  Silently yield an empty string.  */
+    }
+  else if (mb_cur_max <= 1)
+    {
+      substart += pos - 1;
+      sublen = vlen;
     }
   else
-    {
-      /* Multibyte case */
+    for (idx_t idx = 1; *s && vlen; idx++)
+      {
+        idx_t char_bytes = mcel_scanz (s).len;
 
-      /* FIXME: this is wasteful. Some memory can be saved by counting
-         how many bytes the matching characters occupy. */
-      vlim = v = xmalloc (blen + 1);
+        /* Skip until we reach the starting position.  */
+        if (pos <= idx)
+          {
+            if (pos == idx)
+              substart = s;
 
-      mbui_iterator_t iter;
-      size_t idx=1;
-      for (mbui_init (iter, s);
-           mbui_avail (iter) && vlen > 0;
-           mbui_advance (iter), ++idx)
-        {
-          /* Skip until we reach the starting position */
-          if (idx < pos)
-            continue;
+            /* Add one character's length in bytes.  */
+            vlen--;
+            sublen += char_bytes;
+          }
 
-          /* Copy one character */
-          --vlen;
-          vlim = mempcpy (vlim, mbui_cur_ptr (iter), mb_len (mbui_cur (iter)));
-        }
-    }
-  *vlim = '\0';
-  return v;
+        s += char_bytes;
+      }
+
+  return ximemdup0 (substart, sublen);
 }
 
 /* Return the number of logical characters (possibly multibyte)
@@ -223,15 +214,9 @@ mbs_logical_substr (char const *s, size_t pos, size_t len)
 static size_t
 mbs_offset_to_chars (char const *s, size_t ofs)
 {
-  mbui_iterator_t iter;
   size_t c = 0;
-  for (mbui_init (iter, s); mbui_avail (iter); mbui_advance (iter))
-    {
-      ptrdiff_t d = mbui_cur_ptr (iter) - s;
-      if (d >= ofs)
-        break;
-      ++c;
-    }
+  for (size_t d = 0; d < ofs && s[d]; d += mcel_scanz (s + d).len)
+    c++;
   return c;
 }
 
@@ -250,8 +235,8 @@ Usage: %s EXPRESSION\n\
 "),
               program_name, program_name);
       putchar ('\n');
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
 Print the value of EXPRESSION to standard output.  A blank line below\n\
@@ -319,8 +304,6 @@ or 0, 2 if EXPRESSION is syntactically invalid, and 3 if an error occurred.\n\
 int
 main (int argc, char **argv)
 {
-  VALUE *v;
-
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   setlocale (LC_ALL, "");
@@ -335,14 +318,13 @@ main (int argc, char **argv)
 
   /* The above handles --help and --version.
      Since there is no other invocation of getopt, handle '--' here.  */
-  unsigned int u_argc = argc;
-  if (1 < u_argc && STREQ (argv[1], "--"))
+  if (1 < argc && streq (argv[1], "--"))
     {
-      --u_argc;
+      --argc;
       ++argv;
     }
 
-  if (u_argc <= 1)
+  if (argc <= 1)
     {
       error (0, 0, _("missing operand"));
       usage (EXPR_INVALID);
@@ -350,14 +332,14 @@ main (int argc, char **argv)
 
   args = argv + 1;
 
-  v = eval (true);
+  VALUE *v = eval (true);
   if (!nomoreargs ())
-    die (EXPR_INVALID, 0, _("syntax error: unexpected argument %s"),
-         quotearg_n_style (0, locale_quoting_style, *args));
+    error (EXPR_INVALID, 0, _("syntax error: unexpected argument %s"),
+           quotearg_n_style (0, locale_quoting_style, *args));
 
   printv (v);
 
-  return null (v);
+  main_exit (null (v));
 }
 
 /* Return a VALUE for I.  */
@@ -409,13 +391,14 @@ printv (VALUE *v)
       puts (v->u.s);
       break;
     default:
-      abort ();
+      unreachable ();
     }
 }
 
 /* Return true if V is a null-string or zero-number.  */
 
-static bool _GL_ATTRIBUTE_PURE
+ATTRIBUTE_PURE
+static bool
 null (VALUE *v)
 {
   switch (v->type)
@@ -440,19 +423,20 @@ null (VALUE *v)
         return true;
       }
     default:
-      abort ();
+      unreachable ();
     }
 }
 
 /* Return true if CP takes the form of an integer.  */
 
-static bool _GL_ATTRIBUTE_PURE
+ATTRIBUTE_PURE
+static bool
 looks_like_integer (char const *cp)
 {
   cp += (*cp == '-');
 
   do
-    if (! ISDIGIT (*cp))
+    if (! c_isdigit (*cp))
       return false;
   while (*++cp);
 
@@ -477,7 +461,7 @@ tostring (VALUE *v)
     case string:
       break;
     default:
-      abort ();
+      unreachable ();
     }
 }
 
@@ -497,13 +481,13 @@ toarith (VALUE *v)
         if (! looks_like_integer (s))
           return false;
         if (mpz_init_set_str (v->u.i, s, 10) != 0)
-          die (EXPR_FAILURE, ERANGE, "%s", (s));
+          error (EXPR_FAILURE, ERANGE, "%s", (s));
         free (s);
         v->type = integer;
         return true;
       }
     default:
-      abort ();
+      unreachable ();
     }
 }
 
@@ -525,7 +509,7 @@ getsize (mpz_t i)
 }
 
 /* Return true and advance if the next token matches STR exactly.
-   STR must not be NULL.  */
+   STR must not be null.  */
 
 static bool
 nextarg (char const *str)
@@ -534,7 +518,7 @@ nextarg (char const *str)
     return false;
   else
     {
-      bool r = STREQ (*args, str);
+      bool r = streq (*args, str);
       args += r;
       return r;
     }
@@ -545,7 +529,7 @@ nextarg (char const *str)
 static bool
 nomoreargs (void)
 {
-  return *args == 0;
+  return !*args;
 }
 
 /* Report missing operand.
@@ -555,8 +539,8 @@ static void
 require_more_args (void)
 {
   if (nomoreargs ())
-    die (EXPR_INVALID, 0, _("syntax error: missing argument after %s"),
-         quotearg_n_style (0, locale_quoting_style, *(args-1)));
+    error (EXPR_INVALID, 0, _("syntax error: missing argument after %s"),
+           quotearg_n_style (0, locale_quoting_style, *(args - 1)));
 }
 
 
@@ -564,13 +548,10 @@ require_more_args (void)
 /* Print evaluation trace and args remaining.  */
 
 static void
-trace (fxn)
-     char *fxn;
+trace (char const *fxn)
 {
-  char **a;
-
   printf ("%s:", fxn);
-  for (a = args; *a; a++)
+  for (char **a = args; *a; a++)
     printf (" %s", *a);
   putchar ('\n');
 }
@@ -583,32 +564,31 @@ trace (fxn)
 static VALUE *
 docolon (VALUE *sv, VALUE *pv)
 {
-  VALUE *v IF_LINT ( = NULL);
-  char const *errmsg;
-  struct re_pattern_buffer re_buffer;
-  char fastmap[UCHAR_MAX + 1];
-  struct re_registers re_regs;
-  regoff_t matchlen;
-
   tostring (sv);
   tostring (pv);
 
+  struct re_registers re_regs;
   re_regs.num_regs = 0;
   re_regs.start = NULL;
   re_regs.end = NULL;
 
+  struct re_pattern_buffer re_buffer;
+  char fastmap[UCHAR_MAX + 1];
   re_buffer.buffer = NULL;
   re_buffer.allocated = 0;
   re_buffer.fastmap = fastmap;
   re_buffer.translate = NULL;
-  re_syntax_options =
-    RE_SYNTAX_POSIX_BASIC & ~RE_CONTEXT_INVALID_DUP & ~RE_NO_EMPTY_RANGES;
-  errmsg = re_compile_pattern (pv->u.s, strlen (pv->u.s), &re_buffer);
+  re_syntax_options = (RE_SYNTAX_POSIX_BASIC & ~RE_CONTEXT_INVALID_DUP
+                       & ~RE_NO_EMPTY_RANGES);
+  char const *errmsg = re_compile_pattern (pv->u.s, strlen (pv->u.s),
+                                           &re_buffer);
   if (errmsg)
-    die (EXPR_INVALID, 0, "%s", (errmsg));
+    error (EXPR_INVALID, 0, "%s", (errmsg));
   re_buffer.newline_anchor = 0;
 
-  matchlen = re_match (&re_buffer, sv->u.s, strlen (sv->u.s), 0, &re_regs);
+  VALUE *v;
+  regoff_t matchlen = re_match (&re_buffer, sv->u.s, strlen (sv->u.s), 0,
+                                &re_regs);
   if (0 <= matchlen)
     {
       /* Were \(...\) used? */
@@ -641,9 +621,9 @@ docolon (VALUE *sv, VALUE *pv)
         v = int_value (0);
     }
   else
-    die (EXPR_FAILURE,
-         (matchlen == -2 ? errno : EOVERFLOW),
-         _("error in regular expression matcher"));
+    error (EXPR_FAILURE,
+           matchlen == -2 ? errno : EOVERFLOW,
+           _("error in regular expression matcher"));
 
   if (0 < re_regs.num_regs)
     {
@@ -660,8 +640,6 @@ docolon (VALUE *sv, VALUE *pv)
 static VALUE *
 eval7 (bool evaluate)
 {
-  VALUE *v;
-
 #ifdef EVAL_TRACE
   trace ("eval7");
 #endif
@@ -669,18 +647,18 @@ eval7 (bool evaluate)
 
   if (nextarg ("("))
     {
-      v = eval (evaluate);
+      VALUE *v = eval (evaluate);
       if (nomoreargs ())
-        die (EXPR_INVALID, 0, _("syntax error: expecting ')' after %s"),
-             quotearg_n_style (0, locale_quoting_style, *(args-1)));
+        error (EXPR_INVALID, 0, _("syntax error: expecting ')' after %s"),
+               quotearg_n_style (0, locale_quoting_style, *(args - 1)));
       if (!nextarg (")"))
-        die (EXPR_INVALID, 0, _("syntax error: expecting ')' instead of %s"),
-             quotearg_n_style (0, locale_quoting_style, *args));
+        error (EXPR_INVALID, 0, _("syntax error: expecting ')' instead of %s"),
+               quotearg_n_style (0, locale_quoting_style, *args));
       return v;
     }
 
   if (nextarg (")"))
-    die (EXPR_INVALID, 0, _("syntax error: unexpected ')'"));
+    error (EXPR_INVALID, 0, _("syntax error: unexpected ')'"));
 
   return str_value (*args++);
 }
@@ -690,12 +668,6 @@ eval7 (bool evaluate)
 static VALUE *
 eval6 (bool evaluate)
 {
-  VALUE *l;
-  VALUE *r;
-  VALUE *v;
-  VALUE *i1;
-  VALUE *i2;
-
 #ifdef EVAL_TRACE
   trace ("eval6");
 #endif
@@ -706,16 +678,17 @@ eval6 (bool evaluate)
     }
   else if (nextarg ("length"))
     {
-      r = eval6 (evaluate);
+      VALUE *r = eval6 (evaluate);
       tostring (r);
-      v = int_value (mbslen (r->u.s));
+      VALUE *v = int_value (mbslen (r->u.s));
       freev (r);
       return v;
     }
   else if (nextarg ("match"))
     {
-      l = eval6 (evaluate);
-      r = eval6 (evaluate);
+      VALUE *l = eval6 (evaluate);
+      VALUE *r = eval6 (evaluate);
+      VALUE *v;
       if (evaluate)
         {
           v = docolon (l, r);
@@ -728,25 +701,24 @@ eval6 (bool evaluate)
     }
   else if (nextarg ("index"))
     {
-      size_t pos;
-
-      l = eval6 (evaluate);
-      r = eval6 (evaluate);
+      VALUE *l = eval6 (evaluate);
+      VALUE *r = eval6 (evaluate);
       tostring (l);
       tostring (r);
-      pos = mbs_logical_cspn (l->u.s, r->u.s);
-      v = int_value (pos);
+      size_t pos = mbs_logical_cspn (l->u.s, r->u.s);
+      VALUE *v = int_value (pos);
       freev (l);
       freev (r);
       return v;
     }
   else if (nextarg ("substr"))
     {
-      l = eval6 (evaluate);
-      i1 = eval6 (evaluate);
-      i2 = eval6 (evaluate);
+      VALUE *l = eval6 (evaluate);
+      VALUE *i1 = eval6 (evaluate);
+      VALUE *i2 = eval6 (evaluate);
       tostring (l);
 
+      VALUE *v;
       if (!toarith (i1) || !toarith (i2))
         v = str_value ("");
       else
@@ -773,22 +745,18 @@ eval6 (bool evaluate)
 static VALUE *
 eval5 (bool evaluate)
 {
-  VALUE *l;
-  VALUE *r;
-  VALUE *v;
-
 #ifdef EVAL_TRACE
   trace ("eval5");
 #endif
-  l = eval6 (evaluate);
+  VALUE *l = eval6 (evaluate);
   while (true)
     {
       if (nextarg (":"))
         {
-          r = eval6 (evaluate);
+          VALUE *r = eval6 (evaluate);
           if (evaluate)
             {
-              v = docolon (l, r);
+              VALUE *v = docolon (l, r);
               freev (l);
               l = v;
             }
@@ -804,16 +772,14 @@ eval5 (bool evaluate)
 static VALUE *
 eval4 (bool evaluate)
 {
-  VALUE *l;
-  VALUE *r;
-  enum { multiply, divide, mod } fxn;
-
 #ifdef EVAL_TRACE
   trace ("eval4");
 #endif
-  l = eval5 (evaluate);
+  VALUE *l = eval5 (evaluate);
   while (true)
     {
+      enum { multiply, divide, mod } fxn;
+
       if (nextarg ("*"))
         fxn = multiply;
       else if (nextarg ("/"))
@@ -822,13 +788,13 @@ eval4 (bool evaluate)
         fxn = mod;
       else
         return l;
-      r = eval5 (evaluate);
+      VALUE *r = eval5 (evaluate);
       if (evaluate)
         {
           if (!toarith (l) || !toarith (r))
-            die (EXPR_INVALID, 0, _("non-integer argument"));
+            error (EXPR_INVALID, 0, _("non-integer argument"));
           if (fxn != multiply && mpz_sgn (r->u.i) == 0)
-            die (EXPR_INVALID, 0, _("division by zero"));
+            error (EXPR_INVALID, 0, _("division by zero"));
           ((fxn == multiply ? mpz_mul
             : fxn == divide ? mpz_tdiv_q
             : mpz_tdiv_r)
@@ -843,27 +809,25 @@ eval4 (bool evaluate)
 static VALUE *
 eval3 (bool evaluate)
 {
-  VALUE *l;
-  VALUE *r;
-  enum { plus, minus } fxn;
-
 #ifdef EVAL_TRACE
   trace ("eval3");
 #endif
-  l = eval4 (evaluate);
+  VALUE *l = eval4 (evaluate);
   while (true)
     {
+      enum { plus, minus } fxn;
+
       if (nextarg ("+"))
         fxn = plus;
       else if (nextarg ("-"))
         fxn = minus;
       else
         return l;
-      r = eval4 (evaluate);
+      VALUE *r = eval4 (evaluate);
       if (evaluate)
         {
           if (!toarith (l) || !toarith (r))
-            die (EXPR_INVALID, 0, _("non-integer argument"));
+            error (EXPR_INVALID, 0, _("non-integer argument"));
           (fxn == plus ? mpz_add : mpz_sub) (l->u.i, l->u.i, r->u.i);
         }
       freev (r);
@@ -875,20 +839,16 @@ eval3 (bool evaluate)
 static VALUE *
 eval2 (bool evaluate)
 {
-  VALUE *l;
-
 #ifdef EVAL_TRACE
   trace ("eval2");
 #endif
-  l = eval3 (evaluate);
+  VALUE *l = eval3 (evaluate);
   while (true)
     {
-      VALUE *r;
       enum
         {
           less_than, less_equal, equal, not_equal, greater_equal, greater_than
         } fxn;
-      bool val = false;
 
       if (nextarg ("<"))
         fxn = less_than;
@@ -904,14 +864,15 @@ eval2 (bool evaluate)
         fxn = greater_than;
       else
         return l;
-      r = eval3 (evaluate);
+      VALUE *r = eval3 (evaluate);
 
+      bool val = false;
       if (evaluate)
         {
-          int cmp;
           tostring (l);
           tostring (r);
 
+          int cmp;
           if (looks_like_integer (l->u.s) && looks_like_integer (r->u.s))
             cmp = strintcmp (l->u.s, r->u.s);
           else
@@ -923,10 +884,10 @@ eval2 (bool evaluate)
                 {
                   error (0, errno, _("string comparison failed"));
                   error (0, 0, _("set LC_ALL='C' to work around the problem"));
-                  die (EXPR_INVALID, 0,
-                       _("the strings compared were %s and %s"),
-                       quotearg_n_style (0, locale_quoting_style, l->u.s),
-                       quotearg_n_style (1, locale_quoting_style, r->u.s));
+                  error (EXPR_INVALID, 0,
+                         _("the strings compared were %s and %s"),
+                         quotearg_n_style (0, locale_quoting_style, l->u.s),
+                         quotearg_n_style (1, locale_quoting_style, r->u.s));
                 }
             }
 
@@ -938,7 +899,7 @@ eval2 (bool evaluate)
             case not_equal:     val = (cmp != 0); break;
             case greater_equal: val = (cmp >= 0); break;
             case greater_than:  val = (cmp >  0); break;
-            default: abort ();
+            default: unreachable ();
             }
         }
 
@@ -953,18 +914,15 @@ eval2 (bool evaluate)
 static VALUE *
 eval1 (bool evaluate)
 {
-  VALUE *l;
-  VALUE *r;
-
 #ifdef EVAL_TRACE
   trace ("eval1");
 #endif
-  l = eval2 (evaluate);
+  VALUE *l = eval2 (evaluate);
   while (true)
     {
       if (nextarg ("&"))
         {
-          r = eval2 (evaluate && !null (l));
+          VALUE *r = eval2 (evaluate && !null (l));
           if (null (l) || null (r))
             {
               freev (l);
@@ -984,18 +942,15 @@ eval1 (bool evaluate)
 static VALUE *
 eval (bool evaluate)
 {
-  VALUE *l;
-  VALUE *r;
-
 #ifdef EVAL_TRACE
   trace ("eval");
 #endif
-  l = eval1 (evaluate);
+  VALUE *l = eval1 (evaluate);
   while (true)
     {
       if (nextarg ("|"))
         {
-          r = eval1 (evaluate && null (l));
+          VALUE *r = eval1 (evaluate && null (l));
           if (null (l))
             {
               freev (l);

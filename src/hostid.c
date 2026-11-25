@@ -1,6 +1,6 @@
 /* print the hexadecimal identifier for the current host
 
-   Copyright (C) 1997-2021 Free Software Foundation, Inc.
+   Copyright (C) 1997-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,7 +23,6 @@
 
 #include "system.h"
 #include "long-options.h"
-#include "error.h"
 #include "quote.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
@@ -43,8 +42,8 @@ Usage: %s [OPTION]\n\
 Print the numeric identifier (in hexadecimal) for the current host.\n\
 \n\
 "), program_name);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -53,8 +52,6 @@ Print the numeric identifier (in hexadecimal) for the current host.\n\
 int
 main (int argc, char **argv)
 {
-  unsigned int id;
-
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
   setlocale (LC_ALL, "");
@@ -73,12 +70,10 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
-  id = gethostid ();
-
   /* POSIX says gethostid returns a "32-bit identifier" but is silent
      whether it's sign-extended.  Turn off any sign-extension.  This
      is a no-op unless unsigned int is wider than 32 bits.  */
-  id &= 0xffffffff;
+  unsigned int id = gethostid () & 0xffffffff;
 
   printf ("%08x\n", id);
 

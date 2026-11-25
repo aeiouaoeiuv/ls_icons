@@ -1,6 +1,6 @@
 /* Remove directory entries.
 
-   Copyright (C) 1998-2021 Free Software Foundation, Inc.
+   Copyright (C) 1998-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -37,7 +37,7 @@ struct rm_options
   /* If true, query the user about whether to remove each file.  */
   enum rm_interactive interactive;
 
-  // FIXME: remove
+  /* FIXME: remove  */
   /* If true, do not traverse into (or remove) any directory that is
      on a file system (i.e., that has a different device number) other
      than that of the corresponding command line argument.  Note that
@@ -53,7 +53,7 @@ struct rm_options
   bool remove_empty_directories;
 
   /* Pointer to the device and inode numbers of '/', when --recursive
-     and preserving '/'.  Otherwise NULL.  */
+     and preserving '/'.  Otherwise null.  */
   struct dev_ino *root_dev_ino;
 
   /* If true, do not traverse into (or remove) any directory that is
@@ -79,13 +79,15 @@ enum RM_status
 {
   /* These must be listed in order of increasing seriousness. */
   RM_OK = 2,
+  RM_USER_ACCEPTED,
   RM_USER_DECLINED,
   RM_ERROR,
   RM_NONEMPTY_DIR
 };
 
 # define VALID_STATUS(S) \
-  ((S) == RM_OK || (S) == RM_USER_DECLINED || (S) == RM_ERROR)
+  ((S) == RM_OK || (S) == RM_USER_ACCEPTED || (S) == RM_USER_DECLINED \
+   || (S) == RM_ERROR)
 
 # define UPDATE_STATUS(S, New_value)				\
   do								\

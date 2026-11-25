@@ -1,5 +1,5 @@
 /* runcon -- run command with specified security context
-   Copyright (C) 2005-2021 Free Software Foundation, Inc.
+   Copyright (C) 2005-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -47,8 +47,6 @@
 #include <selinux/context.h>
 #include <sys/types.h>
 #include "system.h"
-#include "die.h"
-#include "error.h"
 #include "quote.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
@@ -76,8 +74,8 @@ usage (int status)
   else
     {
       printf (_("\
-Usage: %s CONTEXT COMMAND [args]\n\
-  or:  %s [ -c ] [-u USER] [-r ROLE] [-t TYPE] [-l RANGE] COMMAND [args]\n\
+Usage: %s [CONTEXT COMMAND [ARG]...]\n\
+  or:  %s [-c] [-u USER] [-r ROLE] [-t TYPE] [-l RANGE] COMMAND [ARG]...\n\
 "), program_name, program_name);
       fputs (_("\
 Run a program in a different SELinux security context.\n\
@@ -88,14 +86,25 @@ With neither CONTEXT nor COMMAND, print the current security context.\n\
 
       fputs (_("\
   CONTEXT            Complete security context\n\
-  -c, --compute      compute process transition context before modifying\n\
-  -t, --type=TYPE    type (for same role as parent)\n\
-  -u, --user=USER    user identity\n\
-  -r, --role=ROLE    role\n\
-  -l, --range=RANGE  levelrange\n\
 "), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -c, --compute      compute process transition context before modifying\n\
+"));
+      oputs (_("\
+  -t, --type=TYPE    type (for same role as parent)\n\
+"));
+      oputs (_("\
+  -u, --user=USER    user identity\n\
+"));
+      oputs (_("\
+  -r, --role=ROLE    role\n\
+"));
+      oputs (_("\
+  -l, --range=RANGE  levelrange\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
+      emit_exec_status (PROGRAM_NAME);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -122,6 +131,7 @@ main (int argc, char **argv)
   bindtextdomain (PACKAGE, LOCALEDIR);
   textdomain (PACKAGE);
 
+  initialize_exit_failure (EXIT_CANCELED);
   atexit (close_stdout);
 
   while (true)
@@ -135,22 +145,22 @@ main (int argc, char **argv)
         {
         case 'r':
           if (role)
-            die (EXIT_FAILURE, 0, _("multiple roles"));
+            error (EXIT_CANCELED, 0, _("multiple roles"));
           role = optarg;
           break;
         case 't':
           if (type)
-            die (EXIT_FAILURE, 0, _("multiple types"));
+            error (EXIT_CANCELED, 0, _("multiple types"));
           type = optarg;
           break;
         case 'u':
           if (user)
-            die (EXIT_FAILURE, 0, _("multiple users"));
+            error (EXIT_CANCELED, 0, _("multiple users"));
           user = optarg;
           break;
         case 'l':
           if (range)
-            die (EXIT_FAILURE, 0, _("multiple levelranges"));
+            error (EXIT_CANCELED, 0, _("multiple levelranges"));
           range = optarg;
           break;
         case 'c':
@@ -160,7 +170,7 @@ main (int argc, char **argv)
         case_GETOPT_HELP_CHAR;
         case_GETOPT_VERSION_CHAR (PROGRAM_NAME, AUTHORS);
         default:
-          usage (EXIT_FAILURE);
+          usage (EXIT_CANCELED);
           break;
         }
     }
@@ -168,7 +178,7 @@ main (int argc, char **argv)
   if (argc - optind == 0)
     {
       if (getcon (&cur_context) < 0)
-        die (EXIT_FAILURE, errno, _("failed to get current context"));
+        error (EXIT_CANCELED, errno, _("failed to get current context"));
       fputs (cur_context, stdout);
       fputc ('\n', stdout);
       return EXIT_SUCCESS;
@@ -179,7 +189,7 @@ main (int argc, char **argv)
       if (optind >= argc)
         {
           error (0, 0, _("you must specify -c, -t, -u, -l, -r, or context"));
-          usage (EXIT_FAILURE);
+          usage (EXIT_CANCELED);
         }
       context = argv[optind++];
     }
@@ -187,38 +197,38 @@ main (int argc, char **argv)
   if (optind >= argc)
     {
       error (0, 0, _("no command specified"));
-      usage (EXIT_FAILURE);
+      usage (EXIT_CANCELED);
     }
 
   if (is_selinux_enabled () != 1)
-    die (EXIT_FAILURE, 0, _("%s may be used only on a SELinux kernel"),
-         program_name);
+    error (EXIT_CANCELED, 0, _("%s may be used only on a SELinux kernel"),
+           program_name);
 
   if (context)
     {
       con = context_new (context);
       if (!con)
-        die (EXIT_FAILURE, errno, _("failed to create security context: %s"),
-             quote (context));
+        error (EXIT_CANCELED, errno, _("failed to create security context: %s"),
+               quote (context));
     }
   else
     {
       if (getcon (&cur_context) < 0)
-        die (EXIT_FAILURE, errno, _("failed to get current context"));
+        error (EXIT_CANCELED, errno, _("failed to get current context"));
 
       /* We will generate context based on process transition */
       if (compute_trans)
         {
           /* Get context of file to be executed */
           if (getfilecon (argv[optind], &file_context) == -1)
-            die (EXIT_FAILURE, errno,
-                 _("failed to get security context of %s"),
-                 quoteaf (argv[optind]));
+            error (EXIT_CANCELED, errno,
+                   _("failed to get security context of %s"),
+                   quoteaf (argv[optind]));
           /* compute result of process transition */
           if (security_compute_create (cur_context, file_context,
                                        string_to_security_class ("process"),
                                        &new_context) != 0)
-            die (EXIT_FAILURE, errno, _("failed to compute a new context"));
+            error (EXIT_CANCELED, errno, _("failed to compute a new context"));
           /* free contexts */
           freecon (file_context);
           freecon (cur_context);
@@ -229,33 +239,33 @@ main (int argc, char **argv)
 
       con = context_new (cur_context);
       if (!con)
-        die (EXIT_FAILURE, errno, _("failed to create security context: %s"),
-             quote (cur_context));
+        error (EXIT_CANCELED, errno, _("failed to create security context: %s"),
+               quote (cur_context));
       if (user && context_user_set (con, user))
-        die (EXIT_FAILURE, errno, _("failed to set new user: %s"),
-             quote (user));
+        error (EXIT_CANCELED, errno, _("failed to set new user: %s"),
+               quote (user));
       if (type && context_type_set (con, type))
-        die (EXIT_FAILURE, errno, _("failed to set new type: %s"),
-             quote (type));
+        error (EXIT_CANCELED, errno, _("failed to set new type: %s"),
+               quote (type));
       if (range && context_range_set (con, range))
-        die (EXIT_FAILURE, errno, _("failed to set new range: %s"),
-             quote (range));
+        error (EXIT_CANCELED, errno, _("failed to set new range: %s"),
+               quote (range));
       if (role && context_role_set (con, role))
-        die (EXIT_FAILURE, errno, _("failed to set new role: %s"),
-             quote (role));
+        error (EXIT_CANCELED, errno, _("failed to set new role: %s"),
+               quote (role));
     }
 
   if (security_check_context (context_str (con)) < 0)
-    die (EXIT_FAILURE, errno, _("invalid context: %s"),
-         quote (context_str (con)));
+    error (EXIT_CANCELED, errno, _("invalid context: %s"),
+           quote (context_str (con)));
 
   if (setexeccon (context_str (con)) != 0)
-    die (EXIT_FAILURE, errno, _("unable to set security context %s"),
-         quote (context_str (con)));
+    error (EXIT_CANCELED, errno, _("unable to set security context %s"),
+           quote (context_str (con)));
   if (cur_context != NULL)
     freecon (cur_context);
 
-  execvp (argv[optind], argv + optind);
+  (compute_trans ? execv : execvp) (argv[optind], argv + optind);
 
   int exit_status = errno == ENOENT ? EXIT_ENOENT : EXIT_CANNOT_INVOKE;
   error (0, errno, "%s", quote (argv[optind]));

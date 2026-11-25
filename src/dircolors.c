@@ -1,5 +1,5 @@
 /* dircolors - output commands to set the LS_COLOR environment variable
-   Copyright (C) 1996-2021 Free Software Foundation, Inc.
+   Copyright (C) 1996-2026 Free Software Foundation, Inc.
    Copyright (C) 1994, 1995, 1997, 1998, 1999, 2000 H. Peter Anvin
 
    This program is free software: you can redistribute it and/or modify
@@ -23,9 +23,8 @@
 
 #include "system.h"
 #include "dircolors.h"
+#include "c-ctype.h"
 #include "c-strcase.h"
-#include "die.h"
-#include "error.h"
 #include "obstack.h"
 #include "quote.h"
 #include "stdio--.h"
@@ -45,14 +44,10 @@ enum Shell_syntax
   SHELL_SYNTAX_UNKNOWN
 };
 
+/* The shell syntax being used.  */
+static enum Shell_syntax syntax = SHELL_SYNTAX_UNKNOWN;
+
 #define APPEND_CHAR(C) obstack_1grow (&lsc_obstack, C)
-#define APPEND_TWO_CHAR_STRING(S)					\
-  do									\
-    {									\
-      APPEND_CHAR (S[0]);						\
-      APPEND_CHAR (S[1]);						\
-    }									\
-  while (0)
 
 /* Accumulate in this obstack the value for the LS_COLORS environment
    variable.  */
@@ -72,9 +67,20 @@ static char const *const ls_codes[] =
 {
   "no", "no", "fi", "rs", "di", "ln", "ln", "ln", "or", "mi", "pi", "pi",
   "so", "bd", "bd", "cd", "cd", "do", "ex", "lc", "lc", "rc", "rc", "ec", "ec",
-  "su", "su", "sg", "sg", "st", "ow", "ow", "tw", "tw", "ca", "mh", "cl", NULL
+  "su", "su", "sg", "sg", "st", "ow", "ow", "tw", "tw", "ca", "mh", "cl",
+  NULL
 };
-verify (ARRAY_CARDINALITY (slack_codes) == ARRAY_CARDINALITY (ls_codes));
+static_assert (countof (slack_codes) == countof (ls_codes));
+
+/* Whether to output escaped ls color codes for display.  */
+static bool print_ls_colors;
+
+/* For long options that have no equivalent short option, use a
+   non-character as a pseudo short option, starting with CHAR_MAX + 1.  */
+enum
+{
+  PRINT_LS_COLORS_OPTION = CHAR_MAX + 1,
+};
 
 static struct option const long_options[] =
   {
@@ -83,6 +89,7 @@ static struct option const long_options[] =
     {"csh", no_argument, NULL, 'c'},
     {"c-shell", no_argument, NULL, 'c'},
     {"print-database", no_argument, NULL, 'p'},
+    {"print-ls-colors", no_argument, NULL, PRINT_LS_COLORS_OPTION},
     {GETOPT_HELP_OPTION_DECL},
     {GETOPT_VERSION_OPTION_DECL},
     {NULL, 0, NULL, 0}
@@ -98,14 +105,33 @@ usage (int status)
       printf (_("Usage: %s [OPTION]... [FILE]\n"), program_name);
       fputs (_("\
 Output commands to set the LS_COLORS environment variable.\n\
+"), stdout);
+      fputs (_("\
+\n\
+When FILE is -, read standard input.\n\
+"), stdout);
+      fputs (_("\
 \n\
 Determine format of output:\n\
-  -b, --sh, --bourne-shell    output Bourne shell code to set LS_COLORS\n\
-  -c, --csh, --c-shell        output C shell code to set LS_COLORS\n\
-  -p, --print-database        output defaults\n\
 "), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+      oputs (_("\
+  -b, --sh, --bourne-shell\n\
+         output Bourne shell code to set LS_COLORS\n\
+"));
+      oputs (_("\
+  -c, --csh, --c-shell\n\
+         output C shell code to set LS_COLORS\n\
+"));
+      oputs (_("\
+  -p, --print-database\n\
+         output defaults\n\
+"));
+      oputs (_("\
+      --print-ls-colors\n\
+         output fully escaped colors for display\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
 If FILE is specified, read it to determine which colors to use for which\n\
@@ -132,7 +158,7 @@ guess_shell_syntax (void)
 
   shell = last_component (shell);
 
-  if (STREQ (shell, "csh") || STREQ (shell, "tcsh"))
+  if (streq (shell, "csh") || streq (shell, "tcsh"))
     return SHELL_SYNTAX_C;
 
   return SHELL_SYNTAX_BOURNE;
@@ -148,7 +174,7 @@ parse_line (char const *line, char **keyword, char **arg)
   *keyword = NULL;
   *arg = NULL;
 
-  for (p = line; isspace (to_uchar (*p)); ++p)
+  for (p = line; c_isspace (*p); ++p)
     continue;
 
   /* Ignore blank lines and shell-style comments.  */
@@ -157,7 +183,7 @@ parse_line (char const *line, char **keyword, char **arg)
 
   keyword_start = p;
 
-  while (!isspace (to_uchar (*p)) && *p != '\0')
+  while (!c_isspace (*p) && *p != '\0')
     {
       ++p;
     }
@@ -170,7 +196,7 @@ parse_line (char const *line, char **keyword, char **arg)
     {
       ++p;
     }
-  while (isspace (to_uchar (*p)));
+  while (c_isspace (*p));
 
   if (*p == '\0' || *p == '#')
     return;
@@ -180,15 +206,15 @@ parse_line (char const *line, char **keyword, char **arg)
   while (*p != '\0' && *p != '#')
     ++p;
 
-  for (--p; isspace (to_uchar (*p)); --p)
+  for (--p; c_isspace (*p); --p)
     continue;
   ++p;
 
   *arg = ximemdup0 (arg_start, p - arg_start);
 }
 
-/* FIXME: Write a string to standard out, while watching for "dangerous"
-   sequences like unescaped : and = characters.  */
+/* Accumulate STR to LS_COLORS data.
+   If outputting shell syntax, then escape appropriately.  */
 
 static void
 append_quoted (char const *str)
@@ -197,34 +223,64 @@ append_quoted (char const *str)
 
   while (*str != '\0')
     {
-      switch (*str)
-        {
-        case '\'':
-          APPEND_CHAR ('\'');
-          APPEND_CHAR ('\\');
-          APPEND_CHAR ('\'');
-          need_backslash = true;
-          break;
-
-        case '\\':
-        case '^':
-          need_backslash = !need_backslash;
-          break;
-
-        case ':':
-        case '=':
-          if (need_backslash)
+      if (! print_ls_colors)
+        switch (*str)
+          {
+          case '\'':
+            APPEND_CHAR ('\'');
             APPEND_CHAR ('\\');
-          FALLTHROUGH;
+            APPEND_CHAR ('\'');
+            need_backslash = true;
+            break;
 
-        default:
-          need_backslash = true;
-          break;
-        }
+          case '\\':
+          case '^':
+            need_backslash = !need_backslash;
+            break;
+
+          case '!':
+            /* Prevent 'csh' from doing history substitution.  */
+            if (syntax == SHELL_SYNTAX_C)
+              APPEND_CHAR ('\\');
+            need_backslash = true;
+            break;
+
+          case ':':
+          case '=':
+            if (need_backslash)
+              APPEND_CHAR ('\\');
+            FALLTHROUGH;
+
+          default:
+            need_backslash = true;
+            break;
+          }
 
       APPEND_CHAR (*str);
       ++str;
     }
+}
+
+/* Accumulate entry to LS_COLORS data.
+   Use shell syntax unless PRINT_LS_COLORS is set.  */
+
+static void
+append_entry (char prefix, char const *item, char const *arg)
+{
+  if (print_ls_colors)
+    {
+      append_quoted ("\x1B[");
+      append_quoted (arg);
+      APPEND_CHAR ('m');
+    }
+  if (prefix)
+    APPEND_CHAR (prefix);
+  append_quoted (item);
+  APPEND_CHAR (print_ls_colors ? '\t' : '=');
+  append_quoted (arg);
+  if (print_ls_colors)
+    append_quoted ("\x1B[0m");
+  APPEND_CHAR (print_ls_colors ? '\n' : ':');
 }
 
 /* Read the file open on FP (with name FILENAME).  First, look for a
@@ -237,12 +293,13 @@ append_quoted (char const *str)
 static bool
 dc_parse_stream (FILE *fp, char const *filename)
 {
-  size_t line_number = 0;
+  idx_t line_number = 0;
   char const *next_G_line = G_line;
   char *input_line = NULL;
   size_t input_line_size = 0;
   char const *line;
   char const *term;
+  char const *colorterm;
   bool ok = true;
 
   /* State for the parser.  */
@@ -252,6 +309,11 @@ dc_parse_stream (FILE *fp, char const *filename)
   term = getenv ("TERM");
   if (term == NULL || *term == '\0')
     term = "none";
+
+  /* Also match $COLORTERM.  */
+  colorterm = getenv ("COLORTERM");
+  if (colorterm == NULL)
+    colorterm = "";  /* Doesn't match default "?*"  */
 
   while (true)
     {
@@ -264,6 +326,11 @@ dc_parse_stream (FILE *fp, char const *filename)
         {
           if (getline (&input_line, &input_line_size, fp) <= 0)
             {
+              if (ferror (fp))
+                {
+                  error (0, errno, _("%s: read error"), quotef (filename));
+                  ok = false;
+                }
               free (input_line);
               break;
             }
@@ -284,8 +351,8 @@ dc_parse_stream (FILE *fp, char const *filename)
 
       if (arg == NULL)
         {
-          error (0, 0, _("%s:%lu: invalid line;  missing second token"),
-                 quotef (filename), (unsigned long int) line_number);
+          error (0, 0, _("%s:%td: invalid line;  missing second token"),
+                 quotef (filename), line_number);
           ok = false;
           free (keywd);
           continue;
@@ -294,33 +361,25 @@ dc_parse_stream (FILE *fp, char const *filename)
       unrecognized = false;
       if (c_strcasecmp (keywd, "TERM") == 0)
         {
-          if (fnmatch (arg, term, 0) == 0)
-            state = ST_TERMSURE;
-          else if (state != ST_TERMSURE)
-            state = ST_TERMNO;
+          if (state != ST_TERMSURE)
+            state = fnmatch (arg, term, 0) == 0 ? ST_TERMSURE : ST_TERMNO;
+        }
+      else if (c_strcasecmp (keywd, "COLORTERM") == 0)
+        {
+          if (state != ST_TERMSURE)
+            state = fnmatch (arg, colorterm, 0) == 0 ? ST_TERMSURE : ST_TERMNO;
         }
       else
         {
           if (state == ST_TERMSURE)
-            state = ST_TERMYES; /* Another TERM can cancel */
+            state = ST_TERMYES;  /* Another {COLOR,}TERM can cancel.  */
 
           if (state != ST_TERMNO)
             {
               if (keywd[0] == '.')
-                {
-                  APPEND_CHAR ('*');
-                  append_quoted (keywd);
-                  APPEND_CHAR ('=');
-                  append_quoted (arg);
-                  APPEND_CHAR (':');
-                }
+                append_entry ('*', keywd, arg);
               else if (keywd[0] == '*')
-                {
-                  append_quoted (keywd);
-                  APPEND_CHAR ('=');
-                  append_quoted (arg);
-                  APPEND_CHAR (':');
-                }
+                append_entry (0, keywd, arg);
               else if (c_strcasecmp (keywd, "OPTIONS") == 0
                        || c_strcasecmp (keywd, "COLOR") == 0
                        || c_strcasecmp (keywd, "EIGHTBIT") == 0)
@@ -336,29 +395,20 @@ dc_parse_stream (FILE *fp, char const *filename)
                       break;
 
                   if (slack_codes[i] != NULL)
-                    {
-                      APPEND_TWO_CHAR_STRING (ls_codes[i]);
-                      APPEND_CHAR ('=');
-                      append_quoted (arg);
-                      APPEND_CHAR (':');
-                    }
+                    append_entry (0, ls_codes[i], arg);
                   else
-                    {
-                      unrecognized = true;
-                    }
+                    unrecognized = true;
                 }
             }
           else
-            {
-              unrecognized = true;
-            }
+            unrecognized = true;
         }
 
       if (unrecognized && (state == ST_TERMSURE || state == ST_TERMYES))
         {
-          error (0, 0, _("%s:%lu: unrecognized keyword %s"),
+          error (0, 0, _("%s:%td: unrecognized keyword %s"),
                  (filename ? quotef (filename) : _("<internal>")),
-                 (unsigned long int) line_number, keywd);
+                 line_number, quote (keywd));
           ok = false;
         }
 
@@ -374,7 +424,7 @@ dc_parse_file (char const *filename)
 {
   bool ok;
 
-  if (! STREQ (filename, "-") && freopen (filename, "r", stdin) == NULL)
+  if (! streq (filename, "-") && freopen (filename, "r", stdin) == NULL)
     {
       error (0, errno, "%s", quotef (filename));
       return false;
@@ -396,7 +446,6 @@ main (int argc, char **argv)
 {
   bool ok = true;
   int optc;
-  enum Shell_syntax syntax = SHELL_SYNTAX_UNKNOWN;
   bool print_database = false;
 
   initialize_main (&argc, &argv);
@@ -422,6 +471,10 @@ main (int argc, char **argv)
         print_database = true;
         break;
 
+      case PRINT_LS_COLORS_OPTION:
+        print_ls_colors = true;
+        break;
+
       case_GETOPT_HELP_CHAR;
 
       case_GETOPT_VERSION_CHAR (PROGRAM_NAME, AUTHORS);
@@ -435,17 +488,26 @@ main (int argc, char **argv)
 
   /* It doesn't make sense to use --print with either of
      --bourne or --c-shell.  */
-  if (print_database && syntax != SHELL_SYNTAX_UNKNOWN)
+  if ((print_database | print_ls_colors) && syntax != SHELL_SYNTAX_UNKNOWN)
     {
       error (0, 0,
-             _("the options to output dircolors' internal database and\n"
-               "to select a shell syntax are mutually exclusive"));
+             _("the options to output non shell syntax,\n"
+               "and to select a shell syntax are mutually exclusive"));
+      usage (EXIT_FAILURE);
+    }
+
+  if (print_database && print_ls_colors)
+    {
+      error (0, 0,
+             _("options --print-database and --print-ls-colors "
+               "are mutually exclusive"));
       usage (EXIT_FAILURE);
     }
 
   if ((!print_database) < argc)
     {
-      error (0, 0, _("extra operand %s"), quote (argv[!print_database]));
+      error (0, 0, _("extra operand %s"),
+             quote (argv[!print_database]));
       if (print_database)
         fprintf (stderr, "%s\n",
                  _("file operands cannot be combined with "
@@ -465,14 +527,13 @@ main (int argc, char **argv)
   else
     {
       /* If shell syntax was not explicitly specified, try to guess it. */
-      if (syntax == SHELL_SYNTAX_UNKNOWN)
+      if (syntax == SHELL_SYNTAX_UNKNOWN && ! print_ls_colors)
         {
           syntax = guess_shell_syntax ();
           if (syntax == SHELL_SYNTAX_UNKNOWN)
-            {
-              die (EXIT_FAILURE, 0,
-         _("no SHELL environment variable, and no shell type option given"));
-            }
+            error (EXIT_FAILURE, 0,
+                   _("no SHELL environment variable,"
+                     " and no shell type option given"));
         }
 
       obstack_init (&lsc_obstack);
@@ -498,9 +559,11 @@ main (int argc, char **argv)
               prefix = "setenv LS_COLORS '";
               suffix = "'\n";
             }
-          fputs (prefix, stdout);
+          if (! print_ls_colors)
+            fputs (prefix, stdout);
           fwrite (s, 1, len, stdout);
-          fputs (suffix, stdout);
+          if (! print_ls_colors)
+            fputs (suffix, stdout);
         }
     }
 

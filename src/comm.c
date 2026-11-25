@@ -1,5 +1,5 @@
 /* comm -- compare two sorted files line by line.
-   Copyright (C) 1986-2021 Free Software Foundation, Inc.
+   Copyright (C) 1986-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,8 +22,6 @@
 #include <sys/types.h>
 #include "system.h"
 #include "linebuffer.h"
-#include "die.h"
-#include "error.h"
 #include "fadvise.h"
 #include "hard-locale.h"
 #include "quote.h"
@@ -38,21 +36,17 @@
   proper_name ("Richard M. Stallman"), \
   proper_name ("David MacKenzie")
 
-/* Undefine, to avoid warning about redefinition on some systems.  */
-#undef min
-#define min(x, y) ((x) < (y) ? (x) : (y))
-
 /* True if the LC_COLLATE locale is hard.  */
 static bool hard_LC_COLLATE;
 
 /* If true, print lines that are found only in file 1. */
-static bool only_file_1;
+static bool only_file_1 = true;
 
 /* If true, print lines that are found only in file 2. */
-static bool only_file_2;
+static bool only_file_2 = true;
 
 /* If true, print lines that are found in both files. */
-static bool both;
+static bool both = true;
 
 /* If nonzero, we have seen at least one unpairable line. */
 static bool seen_unpairable;
@@ -118,7 +112,7 @@ Compare sorted files FILE1 and FILE2 line by line.\n\
 "), stdout);
       fputs (_("\
 \n\
-When FILE1 or FILE2 (not both) is -, read standard input.\n\
+When FILE1 or FILE2 is -, read standard input.\n\
 "), stdout);
       fputs (_("\
 \n\
@@ -126,32 +120,41 @@ With no options, produce three-column output.  Column one contains\n\
 lines unique to FILE1, column two contains lines unique to FILE2,\n\
 and column three contains lines common to both files.\n\
 "), stdout);
+      oputs (_("\
+  -1     suppress column 1 (lines unique to FILE1)\n\
+"));
+      oputs (_("\
+  -2     suppress column 2 (lines unique to FILE2)\n\
+"));
+      oputs (_("\
+  -3     suppress column 3 (lines that appear in both files)\n\
+"));
+      oputs (_("\
+      --check-order\n\
+         check that the input is correctly sorted,\n\
+         even if all input lines are pairable\n\
+"));
+      oputs (_("\
+      --nocheck-order\n\
+         do not check that the input is correctly sorted\n\
+"));
+      oputs (_("\
+      --output-delimiter=STR\n\
+         separate columns with STR\n\
+"));
+      oputs (_("\
+      --total\n\
+         output a summary\n\
+"));
+      oputs (_("\
+  -z, --zero-terminated\n\
+         line delimiter is NUL, not newline\n\
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\
 \n\
-  -1                      suppress column 1 (lines unique to FILE1)\n\
-  -2                      suppress column 2 (lines unique to FILE2)\n\
-  -3                      suppress column 3 (lines that appear in both files)\n\
-"), stdout);
-      fputs (_("\
-\n\
-      --check-order       check that the input is correctly sorted, even\n\
-                            if all input lines are pairable\n\
-      --nocheck-order     do not check that the input is correctly sorted\n\
-"), stdout);
-      fputs (_("\
-      --output-delimiter=STR  separate columns with STR\n\
-"), stdout);
-      fputs (_("\
-      --total             output a summary\n\
-"), stdout);
-      fputs (_("\
-  -z, --zero-terminated   line delimiter is NUL, not newline\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
-      fputs (_("\
-\n\
-Note, comparisons honor the rules specified by 'LC_COLLATE'.\n\
+Comparisons honor the rules specified by 'LC_COLLATE'.\n\
 "), stdout);
       printf (_("\
 \n\
@@ -165,13 +168,13 @@ Examples:\n\
   exit (status);
 }
 
-/* Output the line in linebuffer LINE to stream STREAM
+/* Output the line in linebuffer LINE to stdout
    provided the switches say it should be output.
    CLASS is 1 for a line found only in file 1,
    2 for a line only in file 2, 3 for a line in both. */
 
 static void
-writeline (struct linebuffer const *line, FILE *stream, int class)
+writeline (struct linebuffer const *line, int class)
 {
   switch (class)
     {
@@ -184,20 +187,23 @@ writeline (struct linebuffer const *line, FILE *stream, int class)
       if (!only_file_2)
         return;
       if (only_file_1)
-        fwrite (col_sep, 1, col_sep_len, stream);
+        fwrite (col_sep, 1, col_sep_len, stdout);
       break;
 
     case 3:
       if (!both)
         return;
       if (only_file_1)
-        fwrite (col_sep, 1, col_sep_len, stream);
+        fwrite (col_sep, 1, col_sep_len, stdout);
       if (only_file_2)
-        fwrite (col_sep, 1, col_sep_len, stream);
+        fwrite (col_sep, 1, col_sep_len, stdout);
       break;
     }
 
-  fwrite (line->buffer, sizeof (char), line->length, stream);
+  fwrite (line->buffer, sizeof (char), line->length, stdout);
+
+  if (ferror (stdout))
+    write_error ();
 }
 
 /* Check that successive input lines PREV and CURRENT from input file
@@ -248,16 +254,17 @@ check_order (struct linebuffer const *prev,
 /* Compare INFILES[0] and INFILES[1].
    If either is "-", use the standard input for that file.
    Assume that each input file is sorted;
-   merge them and output the result.  */
+   merge them and output the result.
+   Exit the program when done.  */
 
-static void
+static _Noreturn void
 compare_files (char **infiles)
 {
   /* For each file, we have four linebuffers in lba. */
   struct linebuffer lba[2][4];
 
   /* thisline[i] points to the linebuffer holding the next available line
-     in file i, or is NULL if there are no lines left in that file.  */
+     in file i, or is null if there are no lines left in that file.  */
   struct linebuffer *thisline[2];
 
   /* all_line[i][alt[i][0]] also points to the linebuffer holding the
@@ -274,12 +281,10 @@ compare_files (char **infiles)
   /* Counters for the summary.  */
   uintmax_t total[] = {0, 0, 0};
 
-  int i, j;
-
   /* Initialize the storage. */
-  for (i = 0; i < 2; i++)
+  for (int i = 0; i < 2; i++)
     {
-      for (j = 0; j < 4; j++)
+      for (int j = 0; j < 4; j++)
         {
           initbuffer (&lba[i][j]);
           all_line[i][j] = &lba[i][j];
@@ -287,16 +292,16 @@ compare_files (char **infiles)
       alt[i][0] = 0;
       alt[i][1] = 0;
       alt[i][2] = 0;
-      streams[i] = (STREQ (infiles[i], "-") ? stdin : fopen (infiles[i], "r"));
+      streams[i] = (streq (infiles[i], "-") ? stdin : fopen (infiles[i], "r"));
       if (!streams[i])
-        die (EXIT_FAILURE, errno, "%s", quotef (infiles[i]));
+        error (EXIT_FAILURE, errno, "%s", quotef (infiles[i]));
 
       fadvise (streams[i], FADVISE_SEQUENTIAL);
 
       thisline[i] = readlinebuffer_delim (all_line[i][alt[i][0]], streams[i],
                                           delim);
       if (ferror (streams[i]))
-        die (EXIT_FAILURE, errno, "%s", quotef (infiles[i]));
+        error (EXIT_FAILURE, errno, "%s", quotef (infiles[i]));
     }
 
   while (thisline[0] || thisline[1])
@@ -317,12 +322,10 @@ compare_files (char **infiles)
                               thisline[1]->buffer, thisline[1]->length - 1);
           else
             {
-              size_t len = min (thisline[0]->length, thisline[1]->length) - 1;
+              size_t len = MIN (thisline[0]->length, thisline[1]->length) - 1;
               order = memcmp (thisline[0]->buffer, thisline[1]->buffer, len);
               if (order == 0)
-                order = (thisline[0]->length < thisline[1]->length
-                         ? -1
-                         : thisline[0]->length != thisline[1]->length);
+                order = _GL_CMP (thisline[0]->length, thisline[1]->length);
             }
         }
 
@@ -331,7 +334,7 @@ compare_files (char **infiles)
         {
           /* Line is seen in both files.  */
           total[2]++;
-          writeline (thisline[1], stdout, 3);
+          writeline (thisline[1], 3);
         }
       else
         {
@@ -340,13 +343,13 @@ compare_files (char **infiles)
             {
               /* Line is seen in file 1 only.  */
               total[0]++;
-              writeline (thisline[0], stdout, 1);
+              writeline (thisline[0], 1);
             }
           else
             {
               /* Line is seen in file 2 only.  */
               total[1]++;
-              writeline (thisline[1], stdout, 2);
+              writeline (thisline[1], 2);
             }
         }
 
@@ -357,7 +360,7 @@ compare_files (char **infiles)
       if (order <= 0)
         fill_up[0] = true;
 
-      for (i = 0; i < 2; i++)
+      for (int i = 0; i < 2; i++)
         if (fill_up[i])
           {
             /* Rotate the buffers for this file. */
@@ -379,28 +382,44 @@ compare_files (char **infiles)
                            all_line[i][alt[i][1]], i + 1);
 
             if (ferror (streams[i]))
-              die (EXIT_FAILURE, errno, "%s", quotef (infiles[i]));
+              error (EXIT_FAILURE, errno, "%s", quotef (infiles[i]));
 
             fill_up[i] = false;
           }
     }
 
-  for (i = 0; i < 2; i++)
+  /* Avoid closing standard input twice when invoking 'comm - -'.  */
+  const int n_streams = 2 - (streams[0] == streams[1]);
+  for (int i = 0; i < n_streams; i++)
     if (fclose (streams[i]) != 0)
-      die (EXIT_FAILURE, errno, "%s", quotef (infiles[i]));
+      error (EXIT_FAILURE, errno, "%s", quotef (infiles[i]));
 
   if (total_option)
     {
       /* Print the summary, minding the column and line delimiters.  */
-      char buf1[INT_BUFSIZE_BOUND (uintmax_t)];
-      char buf2[INT_BUFSIZE_BOUND (uintmax_t)];
-      char buf3[INT_BUFSIZE_BOUND (uintmax_t)];
-      printf ("%s%s%s%s%s%s%s%c",
-              umaxtostr (total[0], buf1), col_sep,
-              umaxtostr (total[1], buf2), col_sep,
-              umaxtostr (total[2], buf3), col_sep,
-              _("total"), delim);
+      if (col_sep_len == 1)
+        { /* Separate to handle NUL char.  */
+          printf ("%ju%c%ju%c%ju%c%s%c",
+                  total[0], *col_sep,
+                  total[1], *col_sep,
+                  total[2], *col_sep,
+                  _("total"), delim);
+        }
+      else
+        {
+          printf ("%ju%s%ju%s%ju%s%s%c",
+                  total[0], col_sep,
+                  total[1], col_sep,
+                  total[2], col_sep,
+                  _("total"), delim);
+        }
     }
+
+  if (issued_disorder_warning[0] || issued_disorder_warning[1])
+    error (EXIT_FAILURE, 0, _("input is not in sorted order"));
+
+  /* Exit here to pacify gcc -fsanitizer=leak.  */
+  exit (EXIT_SUCCESS);
 }
 
 int
@@ -416,15 +435,6 @@ main (int argc, char **argv)
   hard_LC_COLLATE = hard_locale (LC_COLLATE);
 
   atexit (close_stdout);
-
-  only_file_1 = true;
-  only_file_2 = true;
-  both = true;
-
-  seen_unpairable = false;
-  issued_disorder_warning[0] = issued_disorder_warning[1] = false;
-  check_input_order = CHECK_ORDER_DEFAULT;
-  total_option = false;
 
   while ((c = getopt_long (argc, argv, "123z", long_options, NULL)) != -1)
     switch (c)
@@ -454,8 +464,8 @@ main (int argc, char **argv)
         break;
 
       case OUTPUT_DELIMITER_OPTION:
-        if (col_sep_len && !STREQ (col_sep, optarg))
-          die (EXIT_FAILURE, 0, _("multiple output delimiters specified"));
+        if (col_sep_len && !streq (col_sep, optarg))
+          error (EXIT_FAILURE, 0, _("multiple output delimiters specified"));
         col_sep = optarg;
         col_sep_len = *optarg ? strlen (optarg) : 1;
         break;
@@ -491,9 +501,4 @@ main (int argc, char **argv)
     }
 
   compare_files (argv + optind);
-
-  if (issued_disorder_warning[0] || issued_disorder_warning[1])
-    die (EXIT_FAILURE, 0, _("input is not in sorted order"));
-  else
-    return EXIT_SUCCESS;
 }

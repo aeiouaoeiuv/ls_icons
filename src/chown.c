@@ -1,5 +1,5 @@
-/* chown -- change user and group ownership of files
-   Copyright (C) 1989-2021 Free Software Foundation, Inc.
+/* chown, chgrp -- change user and group ownership of files
+   Copyright (C) 1989-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,16 +22,15 @@
 #include <getopt.h>
 
 #include "system.h"
+#include "chown.h"
 #include "chown-core.h"
-#include "die.h"
-#include "error.h"
 #include "fts_.h"
 #include "quote.h"
 #include "root-dev-ino.h"
 #include "userspec.h"
 
 /* The official name of this program (e.g., no 'g' prefix).  */
-#define PROGRAM_NAME "chown"
+#define PROGRAM_NAME (chown_mode == CHOWN_CHOWN ? "chown" : "chgrp")
 
 #define AUTHORS \
   proper_name ("David MacKenzie"), \
@@ -78,69 +77,83 @@ usage (int status)
   else
     {
       printf (_("\
-Usage: %s [OPTION]... [OWNER][:[GROUP]] FILE...\n\
+Usage: %s [OPTION]... %s FILE...\n\
   or:  %s [OPTION]... --reference=RFILE FILE...\n\
 "),
-              program_name, program_name);
-      fputs (_("\
+              program_name,
+              chown_mode == CHOWN_CHOWN ? _("[OWNER][:[GROUP]]") : _("GROUP"),
+              program_name);
+      if (chown_mode == CHOWN_CHOWN)
+        fputs (_("\
 Change the owner and/or group of each FILE to OWNER and/or GROUP.\n\
 With --reference, change the owner and group of each FILE to those of RFILE.\n\
 \n\
 "), stdout);
-      fputs (_("\
-  -c, --changes          like verbose but report only when a change is made\n\
-  -f, --silent, --quiet  suppress most error messages\n\
-  -v, --verbose          output a diagnostic for every file processed\n\
+      else
+        fputs (_("\
+Change the group of each FILE to GROUP.\n\
+With --reference, change the group of each FILE to that of RFILE.\n\
+\n\
 "), stdout);
-      fputs (_("\
-      --dereference      affect the referent of each symbolic link (this is\n\
-                         the default), rather than the symbolic link itself\n\
-  -h, --no-dereference   affect symbolic links instead of any referenced file\n\
-"), stdout);
-      fputs (_("\
-                         (useful only on systems that can change the\n\
-                         ownership of a symlink)\n\
-"), stdout);
-      fputs (_("\
+      oputs (_("\
+  -c, --changes\n\
+         like verbose but report only when a change is made\n\
+"));
+      oputs (_("\
+  -f, --silent, --quiet\n\
+         suppress most error messages\n\
+"));
+      oputs (_("\
+  -v, --verbose\n\
+         output a diagnostic for every file processed\n\
+"));
+      oputs (_("\
+      --dereference\n\
+         affect the referent of each symbolic link (this is\n\
+         the default), rather than the symbolic link itself\n\
+"));
+      oputs (_("\
+  -h, --no-dereference\n\
+         affect symbolic links instead of any referenced file;\n\
+         useful only on systems that can change the ownership of a symlink\n\
+"));
+      oputs (_("\
       --from=CURRENT_OWNER:CURRENT_GROUP\n\
-                         change the owner and/or group of each file only if\n\
-                         its current owner and/or group match those specified\n\
-                         here.  Either may be omitted, in which case a match\n\
-                         is not required for the omitted attribute\n\
-"), stdout);
-      fputs (_("\
-      --no-preserve-root  do not treat '/' specially (the default)\n\
-      --preserve-root    fail to operate recursively on '/'\n\
-"), stdout);
-      fputs (_("\
-      --reference=RFILE  use RFILE's owner and group rather than\n\
-                         specifying OWNER:GROUP values\n\
-"), stdout);
-      fputs (_("\
-  -R, --recursive        operate on files and directories recursively\n\
-"), stdout);
-      fputs (_("\
-\n\
-The following options modify how a hierarchy is traversed when the -R\n\
-option is also specified.  If more than one is specified, only the final\n\
-one takes effect.\n\
-\n\
-  -H                     if a command line argument is a symbolic link\n\
-                         to a directory, traverse it\n\
-  -L                     traverse every symbolic link to a directory\n\
-                         encountered\n\
-  -P                     do not traverse any symbolic links (default)\n\
-\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
-      fputs (_("\
+         change the ownership of each file only if its\n\
+         current owner and/or group match those specified here.\n\
+         Either may be omitted, in which case a match\n\
+         is not required for the omitted attribute\n\
+"));
+      oputs (_("\
+      --no-preserve-root\n\
+         do not treat '/' specially (the default)\n\
+"));
+      oputs (_("\
+      --preserve-root\n\
+         fail to operate recursively on '/'\n\
+"));
+      oputs (_("\
+      --reference=RFILE\n\
+         use RFILE's ownership rather than specifying values.\n\
+         RFILE is always dereferenced if a symbolic link.\n\
+"));
+      oputs (_("\
+  -R, --recursive\n\
+         operate on files and directories recursively\n\
+"));
+      emit_symlink_recurse_options ("-P");
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
+      if (chown_mode == CHOWN_CHOWN)
+        fputs (_("\
 \n\
 Owner is unchanged if missing.  Group is unchanged if missing, but changed\n\
 to login group if implied by a ':' following a symbolic OWNER.\n\
 OWNER and GROUP may be numeric as well as symbolic.\n\
 "), stdout);
-      printf (_("\
+
+      if (chown_mode == CHOWN_CHOWN)
+        printf (_("\
 \n\
 Examples:\n\
   %s root /u        Change the owner of /u to \"root\".\n\
@@ -148,6 +161,14 @@ Examples:\n\
   %s -hR root /u    Change the owner of /u and subfiles to \"root\".\n\
 "),
               program_name, program_name, program_name);
+      else
+        printf (_("\
+\n\
+Examples:\n\
+  %s staff /u      Change the group of /u to \"staff\".\n\
+  %s -hR staff /u  Change the group of /u and subfiles to \"staff\".\n\
+"),
+              program_name, program_name);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -157,9 +178,6 @@ int
 main (int argc, char **argv)
 {
   bool preserve_root = false;
-
-  uid_t uid = -1;	/* Specified uid; -1 if not to be changed. */
-  gid_t gid = -1;	/* Specified gid; -1 if not to be changed. */
 
   /* Change the owner (group) of a file only if it has this uid (gid).
      -1 means there's no restriction.  */
@@ -174,8 +192,6 @@ main (int argc, char **argv)
   int dereference = -1;
 
   struct Chown_option chopt;
-  bool ok;
-  int optc;
 
   initialize_main (&argc, &argv);
   set_program_name (argv[0]);
@@ -187,6 +203,7 @@ main (int argc, char **argv)
 
   chopt_init (&chopt);
 
+  int optc;
   while ((optc = getopt_long (argc, argv, "HLPRcfhv", long_options, NULL))
          != -1)
     {
@@ -227,11 +244,12 @@ main (int argc, char **argv)
 
         case FROM_OPTION:
           {
-            char const *e = parse_user_spec (optarg,
-                                             &required_uid, &required_gid,
-                                             NULL, NULL);
+            bool warn;
+            char const *e = parse_user_spec_warn (optarg,
+                                                  &required_uid, &required_gid,
+                                                  NULL, NULL, &warn);
             if (e)
-              die (EXIT_FAILURE, 0, "%s: %s", e, quote (optarg));
+              error (warn ? 0 : EXIT_FAILURE, 0, "%s: %s", e, quote (optarg));
             break;
           }
 
@@ -263,8 +281,8 @@ main (int argc, char **argv)
       if (bit_flags == FTS_PHYSICAL)
         {
           if (dereference == 1)
-            die (EXIT_FAILURE, 0,
-                 _("-R --dereference requires either -H or -L"));
+            error (EXIT_FAILURE, 0,
+                   _("-R --dereference requires either -H or -L"));
           dereference = 0;
         }
     }
@@ -283,29 +301,48 @@ main (int argc, char **argv)
       usage (EXIT_FAILURE);
     }
 
+  uid_t uid = -1;	/* Specified uid; -1 if not to be changed.  */
+  gid_t gid = -1;	/* Specified gid; -1 if not to be changed.  */
+
   if (reference_file)
     {
       struct stat ref_stats;
       if (stat (reference_file, &ref_stats))
-        die (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
-             quoteaf (reference_file));
+        error (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
+               quoteaf (reference_file));
 
-      uid = ref_stats.st_uid;
+      if (chown_mode == CHOWN_CHOWN)
+        {
+          uid = ref_stats.st_uid;
+          chopt.user_name = uid_to_name (ref_stats.st_uid);
+        }
       gid = ref_stats.st_gid;
-      chopt.user_name = uid_to_name (ref_stats.st_uid);
       chopt.group_name = gid_to_name (ref_stats.st_gid);
     }
   else
     {
-      char const *e = parse_user_spec (argv[optind], &uid, &gid,
-                                       &chopt.user_name, &chopt.group_name);
+      char *ug = argv[optind];
+      if (chown_mode == CHOWN_CHGRP)
+        {
+          ug = xmalloc (1 + strlen (argv[optind]) + 1);
+          stpcpy (stpcpy (ug, ":"), argv[optind]);
+        }
+
+      bool warn;
+      char const *e = parse_user_spec_warn (ug, &uid, &gid,
+                                            &chopt.user_name,
+                                            &chopt.group_name, &warn);
+
+      if (ug != argv[optind])
+        free (ug);
+
       if (e)
-        die (EXIT_FAILURE, 0, "%s: %s", e, quote (argv[optind]));
+        error (warn ? 0 : EXIT_FAILURE, 0, "%s: %s", e, quote (argv[optind]));
 
       /* If a group is specified but no user, set the user name to the
          empty string so that diagnostics say "ownership :GROUP"
          rather than "group GROUP".  */
-      if (!chopt.user_name && chopt.group_name)
+      if (chown_mode == CHOWN_CHOWN && !chopt.user_name && chopt.group_name)
         chopt.user_name = xstrdup ("");
 
       optind++;
@@ -316,16 +353,14 @@ main (int argc, char **argv)
       static struct dev_ino dev_ino_buf;
       chopt.root_dev_ino = get_root_dev_ino (&dev_ino_buf);
       if (chopt.root_dev_ino == NULL)
-        die (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
-             quoteaf ("/"));
+        error (EXIT_FAILURE, errno, _("failed to get attributes of %s"),
+               quoteaf ("/"));
     }
 
   bit_flags |= FTS_DEFER_STAT;
-  ok = chown_files (argv + optind, bit_flags,
-                    uid, gid,
-                    required_uid, required_gid, &chopt);
+  bool ok = chown_files (argv + optind, bit_flags,
+                         uid, gid,
+                         required_uid, required_gid, &chopt);
 
-  IF_LINT (chopt_free (&chopt));
-
-  return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+  main_exit (ok ? EXIT_SUCCESS : EXIT_FAILURE);
 }

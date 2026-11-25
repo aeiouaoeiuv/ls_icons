@@ -1,5 +1,5 @@
 /* stdbuf -- setup the standard streams for a command
-   Copyright (C) 2009-2021 Free Software Foundation, Inc.
+   Copyright (C) 2009-2026 Free Software Foundation, Inc.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,14 +20,13 @@
 #include <stdio.h>
 #include <getopt.h>
 #include <sys/types.h>
-#include <assert.h>
 
 #include "system.h"
-#include "die.h"
-#include "error.h"
+#include "assure.h"
 #include "filenamecat.h"
 #include "quote.h"
 #include "xreadlink.h"
+#include "xstrtol-error.h"
 #include "xstrtol.h"
 #include "c-ctype.h"
 
@@ -35,7 +34,7 @@
 #define PROGRAM_NAME "stdbuf"
 #define LIB_NAME "libstdbuf.so" /* FIXME: don't hardcode  */
 
-#define AUTHORS proper_name ("Padraig Brady")
+#define AUTHORS proper_name_lite ("Padraig Brady", "P\303\241draig Brady")
 
 static char *program_path;
 
@@ -58,27 +57,20 @@ static struct option const longopts[] =
 
 /* Set size to the value of STR, interpreted as a decimal integer,
    optionally multiplied by various values.
-   Return -1 on error, 0 on success.
+   Return LONGINT_OK on success, otherwise an error for use with
+   xstrtol_fatal.
 
    This supports dd BLOCK size suffixes.
    Note we don't support dd's b=512, c=1, w=2 or 21x512MiB formats.  */
-static int
+static enum strtol_error
 parse_size (char const *str, size_t *size)
 {
   uintmax_t tmp_size;
-  enum strtol_error e = xstrtoumax (str, NULL, 10, &tmp_size, "EGkKMPTYZ0");
-  if (e == LONGINT_OK && SIZE_MAX < tmp_size)
+  enum strtol_error e = xstrtoumax (str, NULL, 10,
+                                    &tmp_size, "EGkKMPQRTYZ0");
+  if (e == LONGINT_OK && ckd_add (size, tmp_size, 0))
     e = LONGINT_OVERFLOW;
-
-  if (e == LONGINT_OK)
-    {
-      errno = 0;
-      *size = tmp_size;
-      return 0;
-    }
-
-  errno = (e == LONGINT_OVERFLOW ? EOVERFLOW : errno);
-  return -1;
+  return e;
 }
 
 void
@@ -95,13 +87,17 @@ Run COMMAND, with modified buffering operations for its standard streams.\n\
 
       emit_mandatory_arg_note ();
 
-      fputs (_("\
+      oputs (_("\
   -i, --input=MODE   adjust standard input stream buffering\n\
+"));
+      oputs (_("\
   -o, --output=MODE  adjust standard output stream buffering\n\
+"));
+      oputs (_("\
   -e, --error=MODE   adjust standard error stream buffering\n\
-"), stdout);
-      fputs (HELP_OPTION_DESCRIPTION, stdout);
-      fputs (VERSION_OPTION_DESCRIPTION, stdout);
+"));
+      oputs (HELP_OPTION_DESCRIPTION);
+      oputs (VERSION_OPTION_DESCRIPTION);
       fputs (_("\n\
 If MODE is 'L' the corresponding stream will be line buffered.\n\
 This option is invalid with standard input.\n"), stdout);
@@ -110,7 +106,7 @@ If MODE is '0' the corresponding stream will be unbuffered.\n\
 "), stdout);
       fputs (_("\n\
 Otherwise MODE is a number which may be followed by one of the following:\n\
-KB 1000, K 1024, MB 1000*1000, M 1024*1024, and so on for G, T, P, E, Z, Y.\n\
+KB 1000, K 1024, MB 1000*1000, M 1024*1024, and so on for G,T,P,E,Z,Y,R,Q.\n\
 Binary prefixes can be used, too: KiB=K, MiB=M, and so on.\n\
 In this case the corresponding stream will be fully buffered with the buffer\n\
 size set to MODE bytes.\n\
@@ -121,6 +117,7 @@ for example) then that will override corresponding changes by 'stdbuf'.\n\
 Also some filters (like 'dd' and 'cat' etc.) don't use streams for I/O,\n\
 and are thus unaffected by 'stdbuf' settings.\n\
 "), stdout);
+      emit_exec_status (PROGRAM_NAME);
       emit_ancillary_info (PROGRAM_NAME);
     }
   exit (status);
@@ -146,9 +143,9 @@ set_program_path (char const *arg)
         program_path = dir_name (path);
       else if ((path = getenv ("PATH")))
         {
-          char *dir;
           path = xstrdup (path);
-          for (dir = strtok (path, ":"); dir != NULL; dir = strtok (NULL, ":"))
+          for (char *dir = strtok (path, ":"); dir != NULL;
+               dir = strtok (NULL, ":"))
             {
               char *candidate = file_name_concat (dir, arg, NULL);
               if (access (candidate, X_OK) == 0)
@@ -180,6 +177,8 @@ optc_to_fileno (int c)
     case 'o':
       ret = STDOUT_FILENO;
       break;
+    default:
+      affirm (false);
     }
 
   return ret;
@@ -191,6 +190,9 @@ set_LD_PRELOAD (void)
   int ret;
 #ifdef __APPLE__
   char const *preload_env = "DYLD_INSERT_LIBRARIES";
+#elif defined _AIX
+  char const *preload_env = (sizeof (void *) < 8
+                             ? "LDR_PRELOAD" : "LDR_PRELOAD64");
 #else
   char const *preload_env = "LD_PRELOAD";
 #endif
@@ -240,7 +242,7 @@ set_LD_PRELOAD (void)
 
       ++path;
       if ( ! *path)
-        die (EXIT_CANCELED, 0, _("failed to find %s"), quote (LIB_NAME));
+        error (EXIT_CANCELED, 0, _("failed to find %s"), quote (LIB_NAME));
     }
 
   /* FIXME: Do we need to support libstdbuf.dll, c:, '\' separators etc?  */
@@ -262,11 +264,9 @@ set_LD_PRELOAD (void)
 #endif
 
   if (ret != 0)
-    {
-      die (EXIT_CANCELED, errno,
+    error (EXIT_CANCELED, errno,
            _("failed to update the environment with %s"),
            quote (LD_PRELOAD));
-    }
 }
 
 /* Populate environ with _STDBUF_I=$MODE _STDBUF_O=$MODE _STDBUF_E=$MODE.
@@ -277,7 +277,7 @@ set_libstdbuf_options (void)
 {
   bool env_set = false;
 
-  for (size_t i = 0; i < ARRAY_CARDINALITY (stdbuf); i++)
+  for (size_t i = 0; i < countof (stdbuf); i++)
     {
       if (stdbuf[i].optarg)
         {
@@ -286,20 +286,18 @@ set_libstdbuf_options (void)
 
           if (*stdbuf[i].optarg == 'L')
             ret = asprintf (&var, "%s%c=L", "_STDBUF_",
-                            toupper (stdbuf[i].optc));
+                            c_toupper (stdbuf[i].optc));
           else
-            ret = asprintf (&var, "%s%c=%" PRIuMAX, "_STDBUF_",
-                            toupper (stdbuf[i].optc),
-                            (uintmax_t) stdbuf[i].size);
+            ret = asprintf (&var, "%s%c=%zu", "_STDBUF_",
+                            c_toupper (stdbuf[i].optc),
+                            stdbuf[i].size);
           if (ret < 0)
             xalloc_die ();
 
           if (putenv (var) != 0)
-            {
-              die (EXIT_CANCELED, errno,
+            error (EXIT_CANCELED, errno,
                    _("failed to update the environment with %s"),
                    quote (var));
-            }
 
           env_set = true;
         }
@@ -324,6 +322,7 @@ main (int argc, char **argv)
 
   while ((c = getopt_long (argc, argv, "+i:o:e:", longopts, NULL)) != -1)
     {
+      int const oi = -1;
       int opt_fileno;
 
       switch (c)
@@ -333,7 +332,7 @@ main (int argc, char **argv)
         case 'i':
         case 'o':
           opt_fileno = optc_to_fileno (c);
-          assert (0 <= opt_fileno && opt_fileno < ARRAY_CARDINALITY (stdbuf));
+          affirm (0 <= opt_fileno && opt_fileno < countof (stdbuf));
           stdbuf[opt_fileno].optc = c;
           while (c_isspace (*optarg))
             optarg++;
@@ -343,13 +342,17 @@ main (int argc, char **argv)
               /* -oL will be by far the most common use of this utility,
                  but one could easily think -iL might have the same affect,
                  so disallow it as it could be confusing.  */
-              error (0, 0, _("line buffering stdin is meaningless"));
+              error (0, 0, _("line buffering standard input is meaningless"));
               usage (EXIT_CANCELED);
             }
 
-          if (!STREQ (optarg, "L")
-              && parse_size (optarg, &stdbuf[opt_fileno].size) == -1)
-            die (EXIT_CANCELED, errno, _("invalid mode %s"), quote (optarg));
+          if (!streq (optarg, "L"))
+            {
+              enum strtol_error e = parse_size (optarg,
+                                                &stdbuf[opt_fileno].size);
+              if (e != LONGINT_OK)
+                xstrtol_fatal (e, oi, c, longopts, optarg);
+            }
 
           break;
 
@@ -382,7 +385,7 @@ main (int argc, char **argv)
      stdbuf is running from.  */
   set_program_path (program_name);
   if (!program_path)
-    program_path = xstrdup (PKGLIBDIR);  /* Need to init to non-NULL.  */
+    program_path = xstrdup (PKGLIBDIR);  /* Need to init to non-null.  */
   set_LD_PRELOAD ();
   free (program_path);
 
