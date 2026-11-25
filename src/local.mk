@@ -55,7 +55,7 @@ noinst_HEADERS =		\
   src/ioblksize.h		\
   src/iopoll.h			\
   src/longlong.h		\
-  src/icons-in-terminal.h \
+  src/nerd-icons.h \
   src/ls-icons.h \
   src/ls.h			\
   src/octhexdigits.h		\
@@ -400,9 +400,9 @@ src_stty_SOURCES = src/stty.c
 
 src_cp_SOURCES = src/cp.c $(copy_sources) $(selinux_sources)
 src_date_SOURCES = src/date.c src/show-date.c
-src_dir_SOURCES = src/ls.c src/ls-dir.c
+src_dir_SOURCES = src/ls.c src/ls-dir.c src/ls-icons.c
 src_du_SOURCES = src/du.c src/show-date.c
-src_vdir_SOURCES = src/ls.c src/ls-vdir.c
+src_vdir_SOURCES = src/ls.c src/ls-vdir.c src/ls-icons.c
 src_id_SOURCES = src/id.c src/group-list.c
 src_groups_SOURCES = src/groups.c src/group-list.c
 src_ls_SOURCES = src/ls.c src/ls-ls.c src/ls-icons.c

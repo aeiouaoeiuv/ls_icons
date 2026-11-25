@@ -266,12 +266,7 @@ static size_t quote_name (char const *name,
 static size_t quote_name_buf (char **inbuf, size_t bufsize, char *name,
                               struct quoting_options const *options,
                               int needs_general_quoting, size_t *width,
-<<<<<<< HEAD
                               bool *pad, bool *is_quoted);
-static char *make_link_name (char const *name, char const *linkname);
-=======
-                              bool *pad);
->>>>>>> upstream/master
 static int decode_switches (int argc, char **argv);
 static bool file_ignored (char const *name);
 static uintmax_t gobble_file (char const *name, enum filetype type,
@@ -1705,6 +1700,10 @@ main (int argc, char **argv)
           || (is_colored (C_MISSING) && format == long_format))
         check_symlink_mode = true;
     }
+
+  /* Icons distinguish links to directories and broken links.  */
+  if (isatty (STDOUT_FILENO))
+    check_symlink_mode = true;
 
   if (dereference == DEREF_UNDEFINED)
     dereference = ((immediate_dirs
@@ -4777,6 +4776,61 @@ file_escape (char const *str, bool path)
   return esc;
 }
 
+/* Pick the icon class of F.  SYMLINK_TARGET is true when printing the
+   target name after the arrow of a long-format symlink.  */
+static enum ls_icon_kind
+icon_kind (const struct fileinfo *f, bool symlink_target)
+{
+  mode_t mode;
+
+  if (!f)
+    return LS_ICON_DIR;       /* Directory header from print_dir.  */
+
+  if (f->filetype == symbolic_link && !symlink_target)
+    {
+      if (f->linkname && !f->linkok)
+        return LS_ICON_LINK_BROKEN;
+      if (f->linkok && S_ISDIR (f->linkmode))
+        return LS_ICON_LINK_DIR;
+      return LS_ICON_LINK;
+    }
+
+  if (f->filetype == symbolic_link)
+    {
+      if (!f->linkok)
+        return LS_ICON_LINK_BROKEN;
+      mode = f->linkmode;
+    }
+  else if (f->stat_ok)
+    mode = f->stat.st_mode;
+  else if (is_directory (f))
+    return LS_ICON_DIR;
+  else if (f->filetype == fifo)
+    return LS_ICON_FIFO;
+  else if (f->filetype == sock)
+    return LS_ICON_SOCK;
+  else if (f->filetype == chardev)
+    return LS_ICON_CHARDEV;
+  else if (f->filetype == blockdev)
+    return LS_ICON_BLOCKDEV;
+  else
+    return LS_ICON_FILE;
+
+  if (S_ISDIR (mode))
+    return LS_ICON_DIR;
+  if (S_ISFIFO (mode))
+    return LS_ICON_FIFO;
+  if (S_ISSOCK (mode))
+    return LS_ICON_SOCK;
+  if (S_ISCHR (mode))
+    return LS_ICON_CHARDEV;
+  if (S_ISBLK (mode))
+    return LS_ICON_BLOCKDEV;
+  if (S_ISREG (mode) && (mode & (S_IXUSR | S_IXGRP | S_IXOTH)))
+    return LS_ICON_EXEC;
+  return LS_ICON_FILE;
+}
+
 static size_t
 quote_name (char const *name, struct quoting_options const *options,
             int needs_general_quoting, const struct bin_str *color,
@@ -4824,9 +4878,9 @@ quote_name (char const *name, struct quoting_options const *options,
   if (stack)
     push_current_dired_pos (stack);
 
-  bool is_link = f && f->filetype == symbolic_link && allow_pad;
   if (tty)
-    print_icon(buf, len, stdout, (f && is_directory(f)) || !f, is_link, is_quoted, color && 1);
+    print_icon(buf, len, stdout, icon_kind (f, !allow_pad), is_quoted,
+               color && 1);
 
   fwrite (buf + skip_quotes, 1, len - (skip_quotes * 2), stdout);
 

@@ -6,9 +6,20 @@ This repo added a branch named 'ls_icons', which changes were copied from
 https://github.com/sebastiencs/ls-icons.git.
 
 Also I removed the dependency to 'sebastiencs/icons-in-terminal'. So that
-we can use this repo independently. The icons' unicode are all placed in
-'src/icons-in-terminal.h'. We can change supported file types by modifing
-the structure 'file_matches' in 'src/ls-icons.c'.
+we can use this repo independently.
+
+Icons come from Nerd Fonts v3 (tested with 'Maple Mono NF CN', which ships
+Nerd Fonts 3.4). The terminal must use a Nerd Font, otherwise icons show as
+boxes. File types are configured in 'file_matches' / 'dir_matches' in
+'src/ls-icons.c' (matching is case insensitive, first match wins). Icons are
+referenced by their official Nerd Fonts names: NF_SETI_PYTHON means the glyph
+'seti-python', see https://www.nerdfonts.com/cheat-sheet .
+'src/nerd-icons.h' is generated; after adding or changing an icon run:
+
+  wget https://raw.githubusercontent.com/ryanoasis/nerd-fonts/master/glyphnames.json
+  python3 scripts/gen-nerd-icons.py glyphnames.json [path/to/font.ttf]
+
+Passing the font (needs python3-fonttools) also checks every icon exists in it.
 
 Here is how to use the branch of 'ls_icons':
 

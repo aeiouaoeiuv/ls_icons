@@ -7,13 +7,13 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     container:
       image: aeiouaoeiuv/ubuntu:ls_icons
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Build
         run: |
@@ -27,7 +27,7 @@ jobs:
           strip install/bin/ls
       -
         name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ls
           path: install/bin/ls
