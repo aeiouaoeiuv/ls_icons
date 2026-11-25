@@ -18,7 +18,8 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates git build-essential autoconf automake autopoint \
-            bison gettext gperf texinfo m4 perl patch rsync tar xz-utils zstd wget
+            bison gettext gperf texinfo m4 perl patch rsync tar xz-utils zstd wget \
+            python3
       -
         name: Checkout
         uses: actions/checkout@v4
